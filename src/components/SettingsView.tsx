@@ -11,7 +11,9 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
-  Sliders
+  Sliders,
+  Sun,
+  Moon
 } from 'lucide-react';
 import { Repository, UserSettings } from '../types/index.ts';
 
@@ -20,10 +22,12 @@ interface SettingsViewProps {
   onAddRepo: (repo: { owner: string; repo: string; defaultBranch: string; token?: string }) => Promise<void>;
   onRemoveRepo: (repoId: string) => Promise<void>;
   userSettings: UserSettings | null;
-  onSaveUserSettings: (settings: { syncIntervalMinutes: number; autoRebaseCollisions: boolean }) => Promise<void>;
+  onSaveUserSettings: (settings: { syncIntervalMinutes: number; autoRebaseCollisions: boolean; theme?: 'dark' | 'light' }) => Promise<void>;
   onSyncAll: () => Promise<void>;
   isSyncing: boolean;
   userId: string;
+  theme: 'dark' | 'light';
+  onThemeChange: (theme: 'dark' | 'light') => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -35,6 +39,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onSyncAll,
   isSyncing,
   userId,
+  theme,
+  onThemeChange,
 }) => {
   const [newOwner, setNewOwner] = useState('');
   const [newRepo, setNewRepo] = useState('');
@@ -45,6 +51,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const [syncInterval, setSyncInterval] = useState<number>(userSettings?.syncIntervalMinutes || 5);
   const [autoRebase, setAutoRebase] = useState<boolean>(userSettings?.autoRebaseCollisions ?? true);
+  const [selectedTheme, setSelectedTheme] = useState<'dark' | 'light'>(userSettings?.theme || theme || 'dark');
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [settingsSavedMessage, setSettingsSavedMessage] = useState(false);
 
@@ -81,7 +88,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       await onSaveUserSettings({
         syncIntervalMinutes: syncInterval,
         autoRebaseCollisions: autoRebase,
+        theme: selectedTheme,
       });
+      onThemeChange(selectedTheme);
       setSettingsSavedMessage(true);
       setTimeout(() => setSettingsSavedMessage(false), 2500);
     } catch (err) {
@@ -326,6 +335,51 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               />
               <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500"></div>
             </label>
+          </div>
+
+          {/* Default Dark / Light Mode Setting */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950 p-4">
+            <div>
+              <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                <span>Default App Theme</span>
+              </h4>
+              <p className="text-[11px] text-slate-400">
+                Set your preferred default visual mode (Dark Mode or Light Mode) across all app pages.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedTheme('dark');
+                  onThemeChange('dark');
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
+                  selectedTheme === 'dark'
+                    ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300 font-semibold'
+                    : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-white'
+                }`}
+              >
+                <Moon className="h-3.5 w-3.5 text-cyan-400" />
+                <span>Dark Mode</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedTheme('light');
+                  onThemeChange('light');
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
+                  selectedTheme === 'light'
+                    ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300 font-semibold'
+                    : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-white'
+                }`}
+              >
+                <Sun className="h-3.5 w-3.5 text-amber-400" />
+                <span>Light Mode</span>
+              </button>
+            </div>
           </div>
         </div>
 

@@ -65,6 +65,12 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
 
     // Always fetch latest files directly for this PR from the server/GitHub API
     setIsLoadingFiles(true);
+    const storedToken =
+      localStorage.getItem(`gh_token_${repo.owner}_${repo.repo}`) ||
+      localStorage.getItem('gh_token_global') ||
+      localStorage.getItem('github_token') ||
+      undefined;
+
     fetch('/api/pr-files', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -74,6 +80,7 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
         prNumber: pr.number,
         title: pr.title,
         headBranch: pr.headBranch,
+        githubToken: storedToken,
       }),
     })
       .then((res) => res.json())
@@ -104,6 +111,12 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
   const handleRunRebase = async () => {
     setIsResolving(true);
     try {
+      const storedToken =
+        localStorage.getItem(`gh_token_${repo.owner}_${repo.repo}`) ||
+        localStorage.getItem('gh_token_global') ||
+        localStorage.getItem('github_token') ||
+        undefined;
+
       const response = await fetch('/api/rebase-conflicts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -115,6 +128,7 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
           headBranch: pr.headBranch || 'patch',
           targetBranch: pr.baseBranch || repo.defaultBranch || 'main',
           conflictedFiles: prFiles,
+          githubToken: storedToken,
         }),
       });
 

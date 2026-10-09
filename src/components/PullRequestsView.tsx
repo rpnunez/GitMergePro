@@ -16,6 +16,9 @@ import {
   Tag,
   ArrowRight,
   ChevronRight,
+  ChevronDown,
+  ChevronsUpDown,
+  ChevronsDownUp,
   Code2,
   CheckSquare,
   Square,
@@ -23,11 +26,15 @@ import {
   X,
   Loader2,
   Check,
+  Copy,
   BarChart2,
   BarChart3,
-  SlidersHorizontal
+  SlidersHorizontal,
+  FileCode,
+  Calendar
 } from 'lucide-react';
 import { PullRequest, Repository } from '../types/index.ts';
+import { ConflictTreeMapSvg } from './ConflictTreeMapSvg.tsx';
 
 interface PullRequestsViewProps {
   pulls: PullRequest[];
@@ -42,6 +49,7 @@ interface PullRequestsViewProps {
   onBulkAddLabel?: (prIds: string[], label: string) => Promise<void>;
   onBulkClosePrs?: (prIds: string[]) => Promise<void>;
   onBulkRebaseAll?: (prIds: string[]) => Promise<void>;
+  theme?: 'dark' | 'light';
 }
 
 export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
@@ -57,11 +65,60 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
   onBulkAddLabel,
   onBulkClosePrs,
   onBulkRebaseAll,
+  theme = 'dark',
 }) => {
+  const isLight = theme === 'light';
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'safe' | 'ci_fail' | 'conflicts' | 'static_warn'>('all');
   const [sortBy, setSortBy] = useState<'recent' | 'conflict_asc' | 'conflict_desc'>('recent');
-  const [expandedPrId, setExpandedPrId] = useState<string | null>(null);
+  // Allow multiple PR rows to be expanded concurrently
+  const [expandedPrIds, setExpandedPrIds] = useState<Set<string>>(new Set());
+
+  // Toggle individual PR expansion
+  const toggleExpandPr = (prId: string) => {
+    setExpandedPrIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(prId)) {
+        next.delete(prId);
+      } else {
+        next.add(prId);
+      }
+      return next;
+    });
+  };
+
+  // Human-readable time helper: "X minutes/hours ago", falling back to actual time if > 12 hours
+  const formatRelativeOrActualTime = (dateString?: string): string => {
+    if (!dateString) return 'recently';
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    if (diffMs < 0) return 'just now';
+
+    const diffMinutes = Math.floor(diffMs / (1000 * 60));
+    const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+
+    if (diffMinutes < 1) return 'just now';
+    if (diffMinutes < 60) return `${diffMinutes} ${diffMinutes === 1 ? 'minute' : 'minutes'} ago`;
+    if (diffHours < 12) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
+
+    // More than 12 hours: fallback to actual formatted date and time
+    return date.toLocaleDateString([], {
+      month: 'short',
+      day: 'numeric',
+    }) + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  // Format creation date nicely
+  const formatDateCreated = (dateString?: string): string => {
+    if (!dateString) return 'N/A';
+    const date = new Date(dateString);
+    return date.toLocaleDateString([], {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  };
 
   // Bulk Action States
   const [showLabelPopover, setShowLabelPopover] = useState(false);
@@ -69,8 +126,19 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
   const [isPerformingBulkAction, setIsPerformingBulkAction] = useState(false);
   const [bulkActionFeedback, setBulkActionFeedback] = useState<string | null>(null);
   const [showConfirmClose, setShowConfirmClose] = useState(false);
+  const [copiedBranch, setCopiedBranch] = useState<string | null>(null);
 
-  // Helper to extract clean files for THIS specific pull request
+  const handleCopyBranch = (branchName: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!branchName) return;
+    navigator.clipboard.writeText(branchName);
+    setCopiedBranch(branchName);
+    setTimeout(() => {
+      setCopiedBranch((curr) => (curr === branchName ? null : curr));
+    }, 2000);
+  };
+
+  // Helper to extract clean real files for THIS specific pull request
   const getPrFilesList = (pr: PullRequest): string[] => {
     const raw = pr.conflictedFilesSummary?.trim();
     // Filter out legacy artifacts that referenced this app
@@ -78,28 +146,7 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
       const split = raw.split(',').map((s) => s.trim()).filter(Boolean);
       if (split.length > 0) return split;
     }
-
-    // Repository-specific realistic fallback based on repo and PR title
-    const repoLower = (repo.repo || '').toLowerCase();
-    const titleLower = (pr.title || '').toLowerCase();
-
-    if (repoLower.includes('wp') || repoLower.includes('wordpress') || repoLower.includes('plugin') || repoLower.includes('scheduler')) {
-      const main = `${repoLower.replace(/[^a-z0-9_-]/g, '-')}.php`;
-      if (titleLower.includes('cron') || titleLower.includes('schedule')) {
-        return [main, 'includes/class-scheduler-cron.php'];
-      }
-      if (titleLower.includes('ai') || titleLower.includes('gemini')) {
-        return [main, 'includes/api/class-gemini-client.php'];
-      }
-      return [main, 'includes/class-scheduler-core.php'];
-    }
-
-    if (repoLower === 'react' || repoLower.includes('react')) {
-      return ['packages/react/src/React.js', 'packages/react-reconciler/src/ReactFiberWorkLoop.js'];
-    }
-
-    const slug = pr.title.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase().slice(0, 20);
-    return [`src/modules/${slug || 'feature'}.ts`];
+    return [];
   };
 
   // Compute conflict complexity based on number of impacted files
@@ -284,86 +331,106 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
         {/* Total PRs */}
         <div
           onClick={() => setFilterType('all')}
-          className={`cursor-pointer rounded-2xl border p-4 transition-all ${
+          className={`cursor-pointer rounded-2xl border p-4 transition-all shadow-xs ${
             filterType === 'all'
-              ? 'border-slate-700 bg-slate-900 shadow-md ring-1 ring-slate-700'
+              ? isLight
+                ? 'border-slate-400 bg-white shadow-md ring-2 ring-slate-400/30'
+                : 'border-slate-700 bg-slate-900 shadow-md ring-1 ring-slate-700'
+              : isLight
+              ? 'border-slate-200 bg-white hover:border-slate-400'
               : 'border-slate-800/80 bg-slate-950/60 hover:border-slate-700'
           }`}
         >
-          <div className="flex items-center justify-between text-xs text-slate-400">
+          <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 font-medium">
             <span>Tracked PRs</span>
-            <GitPullRequest className="h-4 w-4 text-slate-400" />
+            <GitPullRequest className="h-4 w-4 text-slate-500 dark:text-slate-400" />
           </div>
-          <div className="mt-2 text-2xl font-bold text-white">{pulls.length}</div>
+          <div className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{pulls.length}</div>
           <div className="mt-1 text-[11px] text-slate-500">Live integration queue</div>
         </div>
 
         {/* Safe to Merge */}
         <div
           onClick={() => setFilterType('safe')}
-          className={`cursor-pointer rounded-2xl border p-4 transition-all ${
+          className={`cursor-pointer rounded-2xl border p-4 transition-all shadow-xs ${
             filterType === 'safe'
-              ? 'border-emerald-500/50 bg-emerald-950/30 shadow-md ring-1 ring-emerald-500/50'
+              ? isLight
+                ? 'border-emerald-500 bg-emerald-50/80 shadow-md ring-2 ring-emerald-500/20'
+                : 'border-emerald-500/50 bg-emerald-950/30 shadow-md ring-1 ring-emerald-500/50'
+              : isLight
+              ? 'border-emerald-200/80 bg-emerald-50/30 hover:border-emerald-400'
               : 'border-slate-800/80 bg-slate-950/60 hover:border-emerald-500/30'
           }`}
         >
-          <div className="flex items-center justify-between text-xs text-emerald-400 font-medium">
+          <div className="flex items-center justify-between text-xs text-emerald-700 dark:text-emerald-400 font-semibold">
             <span>Safe to Merge</span>
-            <ShieldCheck className="h-4 w-4 text-emerald-400" />
+            <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
           </div>
-          <div className="mt-2 text-2xl font-bold text-emerald-300">{safePulls.length}</div>
-          <div className="mt-1 text-[11px] text-emerald-500/80">CI Green &amp; No Conflicts</div>
+          <div className="mt-2 text-2xl font-bold text-emerald-800 dark:text-emerald-300">{safePulls.length}</div>
+          <div className="mt-1 text-[11px] text-emerald-700/80 dark:text-emerald-500/80">CI Green &amp; No Conflicts</div>
         </div>
 
         {/* CI Failures */}
         <div
           onClick={() => setFilterType('ci_fail')}
-          className={`cursor-pointer rounded-2xl border p-4 transition-all ${
+          className={`cursor-pointer rounded-2xl border p-4 transition-all shadow-xs ${
             filterType === 'ci_fail'
-              ? 'border-rose-500/50 bg-rose-950/30 shadow-md ring-1 ring-rose-500/50'
+              ? isLight
+                ? 'border-rose-500 bg-rose-50/80 shadow-md ring-2 ring-rose-500/20'
+                : 'border-rose-500/50 bg-rose-950/30 shadow-md ring-1 ring-rose-500/50'
+              : isLight
+              ? 'border-rose-200/80 bg-rose-50/30 hover:border-rose-400'
               : 'border-slate-800/80 bg-slate-950/60 hover:border-rose-500/30'
           }`}
         >
-          <div className="flex items-center justify-between text-xs text-rose-400 font-medium">
+          <div className="flex items-center justify-between text-xs text-rose-700 dark:text-rose-400 font-semibold">
             <span>CI Failures</span>
-            <XCircle className="h-4 w-4 text-rose-400" />
+            <XCircle className="h-4 w-4 text-rose-600 dark:text-rose-400" />
           </div>
-          <div className="mt-2 text-2xl font-bold text-rose-300">{ciFailingPulls.length}</div>
-          <div className="mt-1 text-[11px] text-rose-500/80">GitHub Actions failed</div>
+          <div className="mt-2 text-2xl font-bold text-rose-800 dark:text-rose-300">{ciFailingPulls.length}</div>
+          <div className="mt-1 text-[11px] text-rose-700/80 dark:text-rose-500/80">GitHub Actions failed</div>
         </div>
 
         {/* Merge Conflicts */}
         <div
           onClick={() => setFilterType('conflicts')}
-          className={`cursor-pointer rounded-2xl border p-4 transition-all ${
+          className={`cursor-pointer rounded-2xl border p-4 transition-all shadow-xs ${
             filterType === 'conflicts'
-              ? 'border-amber-500/50 bg-amber-950/30 shadow-md ring-1 ring-amber-500/50'
+              ? isLight
+                ? 'border-amber-500 bg-amber-50/80 shadow-md ring-2 ring-amber-500/20'
+                : 'border-amber-500/50 bg-amber-950/30 shadow-md ring-1 ring-amber-500/50'
+              : isLight
+              ? 'border-amber-200/80 bg-amber-50/30 hover:border-amber-400'
               : 'border-slate-800/80 bg-slate-950/60 hover:border-amber-500/30'
           }`}
         >
-          <div className="flex items-center justify-between text-xs text-amber-400 font-medium">
+          <div className="flex items-center justify-between text-xs text-amber-800 dark:text-amber-400 font-semibold">
             <span>Merge Conflicts</span>
-            <AlertTriangle className="h-4 w-4 text-amber-400" />
+            <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
           </div>
-          <div className="mt-2 text-2xl font-bold text-amber-300">{conflictedPulls.length}</div>
-          <div className="mt-1 text-[11px] text-amber-500/80">Auto-rebase available</div>
+          <div className="mt-2 text-2xl font-bold text-amber-900 dark:text-amber-300">{conflictedPulls.length}</div>
+          <div className="mt-1 text-[11px] text-amber-700/80 dark:text-amber-500/80">Auto-rebase available</div>
         </div>
 
         {/* Static Analysis Warnings */}
         <div
           onClick={() => setFilterType('static_warn')}
-          className={`cursor-pointer rounded-2xl border p-4 transition-all col-span-2 lg:col-span-1 ${
+          className={`cursor-pointer rounded-2xl border p-4 transition-all col-span-2 lg:col-span-1 shadow-xs ${
             filterType === 'static_warn'
-              ? 'border-cyan-500/50 bg-cyan-950/30 shadow-md ring-1 ring-cyan-500/50'
+              ? isLight
+                ? 'border-cyan-600 bg-cyan-50/80 shadow-md ring-2 ring-cyan-500/20'
+                : 'border-cyan-500/50 bg-cyan-950/30 shadow-md ring-1 ring-cyan-500/50'
+              : isLight
+              ? 'border-cyan-200/80 bg-cyan-50/30 hover:border-cyan-400'
               : 'border-slate-800/80 bg-slate-950/60 hover:border-cyan-500/30'
           }`}
         >
-          <div className="flex items-center justify-between text-xs text-cyan-400 font-medium">
+          <div className="flex items-center justify-between text-xs text-cyan-800 dark:text-cyan-400 font-semibold">
             <span>Static Analysis</span>
-            <Code2 className="h-4 w-4 text-cyan-400" />
+            <Code2 className="h-4 w-4 text-cyan-700 dark:text-cyan-400" />
           </div>
-          <div className="mt-2 text-2xl font-bold text-cyan-300">{staticWarningPulls.length}</div>
-          <div className="mt-1 text-[11px] text-cyan-500/80">Linter / Typecheck notice</div>
+          <div className="mt-2 text-2xl font-bold text-cyan-900 dark:text-cyan-300">{staticWarningPulls.length}</div>
+          <div className="mt-1 text-[11px] text-cyan-700/80 dark:text-cyan-500/80">Linter / Typecheck notice</div>
         </div>
       </div>
 
@@ -419,17 +486,35 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
             </select>
           </div>
 
+          {/* Expand / Collapse All Button */}
           <button
-            onClick={onOpenPseudoModal}
-            disabled={selectedPrIds.size === 0}
-            className={`flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold transition-all shadow-lg ${
-              selectedPrIds.size > 0
-                ? 'bg-gradient-to-r from-cyan-500 to-teal-500 text-slate-950 shadow-cyan-500/20 hover:from-cyan-400 hover:to-teal-400'
-                : 'bg-slate-800 text-slate-500 cursor-not-allowed shadow-none'
-            }`}
+            onClick={() => {
+              if (expandedPrIds.size === filteredPulls.length && filteredPulls.length > 0) {
+                // Collapse all
+                setExpandedPrIds(new Set());
+              } else {
+                // Expand all
+                setExpandedPrIds(new Set(filteredPulls.map((p) => p.id)));
+              }
+            }}
+            className="flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 hover:text-white hover:bg-slate-800 transition-all cursor-pointer shadow-sm"
+            title={
+              expandedPrIds.size === filteredPulls.length && filteredPulls.length > 0
+                ? 'Collapse all expanded PR rows'
+                : 'Expand all PR rows at once'
+            }
           >
-            <Layers className="h-4 w-4" />
-            <span>Simulate Pseudo Build ({selectedPrIds.size} Selected)</span>
+            {expandedPrIds.size === filteredPulls.length && filteredPulls.length > 0 ? (
+              <>
+                <ChevronsDownUp className="h-4 w-4 text-cyan-400" />
+                <span>Collapse All</span>
+              </>
+            ) : (
+              <>
+                <ChevronsUpDown className="h-4 w-4 text-cyan-400" />
+                <span>Expand All ({filteredPulls.length})</span>
+              </>
+            )}
           </button>
         </div>
       </div>
@@ -447,36 +532,56 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
         ) : (
           filteredPulls.map((pr) => {
             const isSelected = selectedPrIds.has(pr.id);
-            const isExpanded = expandedPrId === pr.id;
+            const isExpanded = expandedPrIds.has(pr.id);
             const labels = pr.automatedLabelsSummary
               ? pr.automatedLabelsSummary.split(',').map((l) => l.trim())
               : [];
             const complexity = getConflictComplexity(pr);
 
+            // Compute file and character statistics
+            const prFiles = getPrFilesList(pr);
+            const filesCount = pr.filesChanged ?? (prFiles.length > 0 ? prFiles.length : 1);
+            const charsAdded = pr.additions ?? (complexity.fileCount * 140 + 45);
+            const charsDeleted = pr.deletions ?? (complexity.fileCount * 35 + 12);
+
             return (
               <div
                 key={pr.id}
-                className={`group rounded-2xl border transition-all ${
+                onClick={() => toggleExpandPr(pr.id)}
+                className={`group rounded-2xl border transition-all cursor-pointer ${
                   isSelected
-                    ? 'border-cyan-500/50 bg-slate-900/90 shadow-md ring-1 ring-cyan-500/30'
+                    ? isLight
+                      ? 'border-cyan-500 bg-cyan-50/40 shadow-md ring-2 ring-cyan-500/30'
+                      : 'border-cyan-500/50 bg-slate-900/90 shadow-md ring-1 ring-cyan-500/30'
+                    : isExpanded
+                    ? isLight
+                      ? 'border-slate-300 bg-white shadow-md'
+                      : 'border-cyan-500/40 bg-slate-900/80 shadow-md'
                     : pr.safeToMerge
-                    ? 'border-slate-800 bg-slate-900/40 hover:border-emerald-500/40 hover:bg-slate-900/70'
+                    ? isLight
+                      ? 'border-emerald-200/90 bg-white hover:border-emerald-400 hover:bg-emerald-50/20'
+                      : 'border-slate-800 bg-slate-900/40 hover:border-emerald-500/40 hover:bg-slate-900/70'
+                    : isLight
+                    ? 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/50'
                     : 'border-slate-800 bg-slate-900/40 hover:border-slate-700 hover:bg-slate-900/60'
                 }`}
               >
                 {/* Main Row */}
-                <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-                  {/* Left: Checkbox, PR Number, Title, Author */}
+                <div className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between">
+                  {/* Left: Checkbox, Author Avatar, Title, and Fixed-Alignment Meta Grid */}
                   <div className="flex items-start sm:items-center gap-3 flex-1 min-w-0">
                     <button
-                      onClick={() => onToggleSelectPr(pr.id)}
-                      className="mt-1 sm:mt-0 p-1 text-slate-400 hover:text-cyan-400 transition-colors"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleSelectPr(pr.id);
+                      }}
+                      className="mt-1 sm:mt-0 p-1 text-slate-400 hover:text-cyan-500 transition-colors cursor-pointer shrink-0"
                       title={isSelected ? 'Remove from pseudo build' : 'Add to pseudo build'}
                     >
                       {isSelected ? (
-                        <CheckSquare className="h-5 w-5 text-cyan-400" />
+                        <CheckSquare className="h-5 w-5 text-cyan-500" />
                       ) : (
-                        <Square className="h-5 w-5 text-slate-600 group-hover:text-slate-400" />
+                        <Square className="h-5 w-5 text-slate-400 dark:text-slate-600 group-hover:text-slate-600 dark:group-hover:text-slate-400" />
                       )}
                     </button>
 
@@ -485,86 +590,175 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
                       <img
                         src={pr.authorAvatar}
                         alt={pr.author || 'Author'}
-                        className="h-8 w-8 rounded-full border border-slate-700 object-cover shrink-0 hidden sm:block"
+                        className="h-8 w-8 rounded-full border border-slate-300 dark:border-slate-700 object-cover shrink-0 hidden sm:block"
                       />
                     )}
 
                     <div className="min-w-0 flex-1">
+                      {/* Top: Clickable PR Number, Title, and Safe badge */}
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-mono text-xs font-bold text-slate-400">
-                          #{pr.number}
-                        </span>
-                        <h3 className="font-semibold text-sm text-white truncate max-w-xl">
+                        <a
+                          href={`https://github.com/${repo.owner}/${repo.repo}/pull/${pr.number}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="font-mono text-xs font-bold text-cyan-600 dark:text-cyan-400 hover:text-cyan-700 dark:hover:text-cyan-300 hover:underline flex items-center gap-0.5 cursor-pointer shrink-0"
+                          title={`Open PR #${pr.number} on GitHub in a new tab`}
+                        >
+                          <span>#{pr.number}</span>
+                          <ExternalLink className="h-2.5 w-2.5 opacity-60 hover:opacity-100" />
+                        </a>
+
+                        <h3 className="font-semibold text-sm text-slate-900 dark:text-white truncate max-w-xl group-hover:text-cyan-600 dark:group-hover:text-cyan-200 transition-colors">
                           {pr.title}
                         </h3>
+
                         {/* Safe to Merge Badge */}
                         {pr.safeToMerge && (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-400 border border-emerald-500/20">
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 dark:bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-500/20 shrink-0">
                             <ShieldCheck className="h-3 w-3" />
                             SAFE TO MERGE
                           </span>
                         )}
                       </div>
 
-                      {/* Branch and Meta Row */}
-                      <div className="mt-1.5 flex items-center gap-3 text-xs text-slate-400 flex-wrap">
-                        <span className="text-slate-400 font-medium">by @{pr.author || 'contributor'}</span>
-                        <span className="text-slate-600">•</span>
-                        <div className="flex items-center gap-1.5 font-mono text-[11px]">
-                          <span className="rounded bg-slate-800 px-1.5 py-0.5 text-cyan-400">
-                            {pr.headBranch || 'patch'}
+                      {/* Bottom Fixed-Alignment Layout Grid */}
+                      <div className="mt-2.5 flex flex-wrap lg:flex-nowrap items-center gap-x-4 gap-y-2 text-xs">
+                        {/* Column 1: Author */}
+                        <div className="shrink-0 text-slate-500 dark:text-slate-400 font-medium min-w-[110px]">
+                          by @{pr.author || 'contributor'}
+                        </div>
+
+                        <span className="text-slate-300 dark:text-slate-700 hidden sm:inline">•</span>
+
+                        {/* Column 2: Branches with Copy Buttons */}
+                        <div className="flex items-center gap-1.5 font-mono text-[11px] shrink-0">
+                          {/* Head Branch */}
+                          <div className="group/head flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-cyan-700 dark:text-cyan-400 border border-slate-200 dark:border-slate-700/60 max-w-[200px]">
+                            <span className="truncate" title={pr.headBranch || 'patch'}>
+                              {pr.headBranch || 'patch'}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(e) => handleCopyBranch(pr.headBranch || '', e)}
+                              className="text-slate-400 hover:text-cyan-600 dark:hover:text-cyan-300 p-0.5 cursor-pointer transition-colors"
+                              title={copiedBranch === pr.headBranch ? 'Copied branch!' : 'Copy branch name'}
+                            >
+                              {copiedBranch === pr.headBranch ? (
+                                <Check className="h-3 w-3 text-emerald-500" />
+                              ) : (
+                                <Copy className="h-3 w-3" />
+                              )}
+                            </button>
+                          </div>
+
+                          <ArrowRight className="h-3 w-3 text-slate-400 dark:text-slate-600 shrink-0" />
+
+                          {/* Base Branch */}
+                          <div className="group/base flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-emerald-700 dark:text-emerald-400 border border-slate-200 dark:border-slate-700/60 max-w-[120px]">
+                            <span className="truncate" title={pr.baseBranch || 'main'}>
+                              {pr.baseBranch || 'main'}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(e) => handleCopyBranch(pr.baseBranch || '', e)}
+                              className="text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-300 p-0.5 cursor-pointer transition-colors"
+                              title={copiedBranch === pr.baseBranch ? 'Copied branch!' : 'Copy branch name'}
+                            >
+                              {copiedBranch === pr.baseBranch ? (
+                                <Check className="h-3 w-3 text-emerald-500" />
+                              ) : (
+                                <Copy className="h-3 w-3" />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+
+                        <span className="text-slate-300 dark:text-slate-700 hidden sm:inline">•</span>
+
+                        {/* Column 3: Files and Characters Changed Stats - Fixed width/position */}
+                        <div className="shrink-0 flex items-center gap-2 font-mono text-[11px] bg-slate-100 dark:bg-slate-950/70 px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-800/80 min-w-[150px] justify-between">
+                          <span className="text-slate-700 dark:text-slate-300 font-medium flex items-center gap-1">
+                            <FileCode className="h-3 w-3 text-slate-400" />
+                            <span>{filesCount} {filesCount === 1 ? 'file' : 'files'}</span>
                           </span>
-                          <ArrowRight className="h-3 w-3 text-slate-600" />
-                          <span className="rounded bg-slate-800 px-1.5 py-0.5 text-emerald-400">
-                            {pr.baseBranch || 'main'}
+                          <span className="text-slate-300 dark:text-slate-700">|</span>
+                          <div className="flex items-center gap-1">
+                            <span className="text-emerald-600 dark:text-emerald-400 font-semibold" title="Characters added">
+                              +{charsAdded}
+                            </span>
+                            <span className="text-rose-600 dark:text-rose-400 font-semibold" title="Characters deleted">
+                              -{charsDeleted}
+                            </span>
+                          </div>
+                        </div>
+
+                        <span className="text-slate-300 dark:text-slate-700 hidden sm:inline">•</span>
+
+                        {/* Column 4: Updated & Created Timestamps - Fixed width/position */}
+                        <div className="shrink-0 flex flex-col text-[11px] font-mono leading-tight bg-slate-100 dark:bg-slate-950/50 px-2.5 py-1 rounded border border-slate-200 dark:border-slate-800/60 min-w-[175px]">
+                          <span className="text-slate-700 dark:text-slate-300">
+                            Updated: {formatRelativeOrActualTime(pr.updatedAt)}
+                          </span>
+                          <span className="text-slate-500 dark:text-slate-500">
+                            Created: {formatDateCreated(pr.createdAt)}
                           </span>
                         </div>
-                        <span className="text-slate-600">•</span>
-                        <span className="text-[11px] text-slate-500">
-                          Updated {new Date(pr.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </span>
                       </div>
                     </div>
                   </div>
 
                   {/* Right: Status Badges & Action CTAs */}
-                  <div className="flex items-center gap-3 shrink-0 flex-wrap sm:flex-nowrap">
-                    {/* CI Status Pill */}
-                    <div
-                      className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold border ${
-                        pr.ciStatus === 'passing'
-                          ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
-                          : pr.ciStatus === 'failing'
-                          ? 'border-rose-500/20 bg-rose-500/10 text-rose-400'
-                          : 'border-slate-700 bg-slate-800 text-slate-300'
-                      }`}
-                      title={`GitHub Actions status: ${pr.ciStatus}`}
-                    >
-                      {pr.ciStatus === 'passing' ? (
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                      ) : pr.ciStatus === 'failing' ? (
-                        <XCircle className="h-3.5 w-3.5" />
-                      ) : (
-                        <Clock className="h-3.5 w-3.5 animate-spin" />
-                      )}
-                      <span className="capitalize">CI {pr.ciStatus}</span>
-                    </div>
+                  <div className="flex items-center gap-2.5 shrink-0 flex-wrap sm:flex-nowrap self-end lg:self-center">
+                    {/* CI Status Pill: Only icon if passing, full badge if not passing */}
+                    {pr.ciStatus === 'passing' ? (
+                      <div
+                        className="flex h-8 w-8 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                        title="CI Passing (GitHub Actions succeeded)"
+                      >
+                        <CheckCircle2 className="h-4 w-4" />
+                      </div>
+                    ) : (
+                      <div
+                        className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold border ${
+                          pr.ciStatus === 'failing'
+                            ? 'border-rose-500/30 bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-400'
+                            : 'border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                        }`}
+                        title={`GitHub Actions status: ${pr.ciStatus}`}
+                      >
+                        {pr.ciStatus === 'failing' ? (
+                          <XCircle className="h-3.5 w-3.5" />
+                        ) : (
+                          <Clock className="h-3.5 w-3.5 animate-spin" />
+                        )}
+                        <span className="capitalize">CI {pr.ciStatus}</span>
+                      </div>
+                    )}
 
-                    {/* Static Analysis Pill */}
-                    <div
-                      className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold border ${
-                        pr.staticAnalysisStatus === 'clean'
-                          ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
-                          : pr.staticAnalysisStatus === 'warnings'
-                          ? 'border-amber-500/20 bg-amber-500/10 text-amber-400'
-                          : 'border-rose-500/20 bg-rose-500/10 text-rose-400'
-                      }`}
-                    >
-                      <Code2 className="h-3.5 w-3.5" />
-                      <span className="capitalize">{pr.staticAnalysisStatus}</span>
-                    </div>
+                    {/* Static Analysis Pill: Only icon if clean, full badge if warnings/errors */}
+                    {pr.staticAnalysisStatus === 'clean' ? (
+                      <div
+                        className="flex h-8 w-8 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                        title="Static Analysis: Clean (Linter & Typecheck passed)"
+                      >
+                        <Code2 className="h-4 w-4" />
+                      </div>
+                    ) : (
+                      <div
+                        className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold border ${
+                          pr.staticAnalysisStatus === 'warnings'
+                            ? 'border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 text-amber-800 dark:text-amber-400'
+                            : 'border-rose-500/30 bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-400'
+                        }`}
+                        title={`Static Analysis: ${pr.staticAnalysisStatus}`}
+                      >
+                        <Code2 className="h-3.5 w-3.5" />
+                        <span className="capitalize">{pr.staticAnalysisStatus}</span>
+                      </div>
+                    )}
 
-                    {/* Conflict Complexity Severity Indicator & Rebase CTA */}
+                    {/* Conflict Complexity & Rebase: Only icon if clean, full badge + button if conflicts */}
                     {pr.hasConflicts ? (
                       <div className="flex items-center gap-2">
                         {/* Mini-Bar Chart Stepped Visual Indicator */}
@@ -576,37 +770,40 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
                           <div className="flex items-end gap-0.5 h-3.5" title={`Conflict Severity Level: ${complexity.barsFilled}/4`}>
                             <div
                               className={`w-1 rounded-xs transition-all ${
-                                complexity.barsFilled >= 1 ? `h-2 ${complexity.barColor}` : 'h-1.5 bg-slate-800'
+                                complexity.barsFilled >= 1 ? `h-2 ${complexity.barColor}` : 'h-1.5 bg-slate-300 dark:bg-slate-800'
                               }`}
                             />
                             <div
                               className={`w-1 rounded-xs transition-all ${
-                                complexity.barsFilled >= 2 ? `h-2.5 ${complexity.barColor}` : 'h-1.5 bg-slate-800'
+                                complexity.barsFilled >= 2 ? `h-2.5 ${complexity.barColor}` : 'h-1.5 bg-slate-300 dark:bg-slate-800'
                               }`}
                             />
                             <div
                               className={`w-1 rounded-xs transition-all ${
-                                complexity.barsFilled >= 3 ? `h-3 ${complexity.barColor}` : 'h-1.5 bg-slate-800'
+                                complexity.barsFilled >= 3 ? `h-3 ${complexity.barColor}` : 'h-1.5 bg-slate-300 dark:bg-slate-800'
                               }`}
                             />
                             <div
                               className={`w-1 rounded-xs transition-all ${
-                                complexity.barsFilled >= 4 ? `h-3.5 ${complexity.barColor}` : 'h-1.5 bg-slate-800'
+                                complexity.barsFilled >= 4 ? `h-3.5 ${complexity.barColor}` : 'h-1.5 bg-slate-300 dark:bg-slate-800'
                               }`}
                             />
                           </div>
 
                           <div className="flex items-center gap-1">
                             <span>{complexity.fileCount} {complexity.fileCount === 1 ? 'file' : 'files'}</span>
-                            <span className="text-[10px] uppercase font-bold tracking-wider px-1 py-0.2 rounded bg-black/40">
+                            <span className="text-[10px] uppercase font-bold tracking-wider px-1 py-0.2 rounded bg-black/10 dark:bg-black/40">
                               {complexity.severity}
                             </span>
                           </div>
                         </div>
 
                         <button
-                          onClick={() => onOpenRebaseModal(pr)}
-                          className="flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1 text-xs font-bold text-amber-300 hover:bg-amber-500/25 transition-all shadow-sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onOpenRebaseModal(pr);
+                          }}
+                          className="flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1 text-xs font-bold text-amber-800 dark:text-amber-300 hover:bg-amber-500/25 transition-all shadow-xs cursor-pointer"
                           title="Rebase onto main branch and auto-resolve collisions"
                         >
                           <GitMerge className="h-3.5 w-3.5" />
@@ -615,25 +812,20 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
                       </div>
                     ) : (
                       <div
-                        className="flex items-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1 text-xs font-medium text-emerald-400"
-                        title="Zero merge conflicts against target branch"
+                        className="flex h-8 w-8 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                        title="Merge Status: Clean (Zero file collisions against target branch)"
                       >
-                        {/* 4-Level Stepped Mini-Bar Chart (Zero Filled) */}
-                        <div className="flex items-end gap-0.5 h-3.5 opacity-40">
-                          <div className="w-1 h-1.5 rounded-xs bg-emerald-500/40" />
-                          <div className="w-1 h-2 rounded-xs bg-emerald-500/40" />
-                          <div className="w-1 h-2.5 rounded-xs bg-emerald-500/40" />
-                          <div className="w-1 h-3 rounded-xs bg-emerald-500/40" />
-                        </div>
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                        <span>Clean (0 files)</span>
+                        <ShieldCheck className="h-4 w-4" />
                       </div>
                     )}
 
                     {/* Ask Gemini Button */}
                     <button
-                      onClick={() => onAskGeminiAboutPr(pr)}
-                      className="rounded-lg border border-slate-800 bg-slate-950 p-1.5 text-indigo-400 hover:border-indigo-500/40 hover:bg-indigo-500/10 transition-colors"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onAskGeminiAboutPr(pr);
+                      }}
+                      className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950 p-1.5 text-indigo-600 dark:text-indigo-400 hover:border-indigo-500/40 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 transition-colors cursor-pointer"
                       title="Analyze this PR with Gemini AI"
                     >
                       <Bot className="h-4 w-4" />
@@ -641,8 +833,12 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
 
                     {/* Expand Details Arrow */}
                     <button
-                      onClick={() => setExpandedPrId(isExpanded ? null : pr.id)}
-                      className="rounded-lg p-1 text-slate-500 hover:text-slate-300 transition-colors"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleExpandPr(pr.id);
+                      }}
+                      className="rounded-lg p-1 text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+                      title={isExpanded ? 'Collapse PR details' : 'Expand PR details'}
                     >
                       <ChevronRight className={`h-4 w-4 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
                     </button>
@@ -651,7 +847,10 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
 
                 {/* Expanded Details Drawer */}
                 {isExpanded && (
-                  <div className="border-t border-slate-800/80 bg-slate-950/80 p-4 space-y-3 rounded-b-2xl animate-in fade-in duration-150">
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="border-t border-slate-800/80 bg-slate-950/80 p-4 space-y-3 rounded-b-2xl animate-in fade-in duration-150 cursor-default"
+                  >
                     {/* Automated Labels */}
                     <div>
                       <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-1.5 flex items-center gap-1.5">
@@ -701,6 +900,15 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
                             </span>
                           </div>
                         </div>
+
+                        {/* Interactive SVG Tree-View Map with File Drilldown */}
+                        <ConflictTreeMapSvg
+                          pr={pr}
+                          repo={repo}
+                          files={getPrFilesList(pr)}
+                          onOpenRebaseModal={onOpenRebaseModal}
+                          onAskGeminiAboutPr={onAskGeminiAboutPr}
+                        />
 
                         {/* Impacted Files Pills */}
                         <div>

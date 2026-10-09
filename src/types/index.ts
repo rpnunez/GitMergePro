@@ -26,6 +26,9 @@ export interface PullRequest {
   staticAnalysisStatus: 'clean' | 'warnings' | 'errors';
   hasConflicts: boolean;
   conflictedFilesSummary?: string;
+  filesChanged?: number;
+  additions?: number;
+  deletions?: number;
   safeToMerge: boolean;
   mergeConfidenceScore?: number;
   automatedLabelsSummary?: string;
@@ -74,5 +77,6 @@ export interface UserSettings {
   userId: string;
   syncIntervalMinutes: number;
   autoRebaseCollisions: boolean;
+  theme?: 'dark' | 'light';
   updatedAt: string;
 }

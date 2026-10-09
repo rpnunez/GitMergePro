@@ -1,0 +1,229 @@
+@import "tailwindcss";
+
+/* Ensure proper pointer cursor on all clickable elements */
+button,
+a,
+select,
+input[type="checkbox"],
+input[type="radio"],
+input[type="submit"],
+input[type="button"],
+[role="button"],
+.clickable {
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled,
+select:disabled {
+  cursor: not-allowed;
+}
+
+/* ==========================================================================
+   Comprehensive Light Mode Theme Palette
+   Smooth, polished, and comfortable on the eyes:
+   - Soft off-white canvas (#f8fafc)
+   - Crisp pure white cards (#ffffff) with subtle border definition (#e2e8f0)
+   - Rich readable dark text (#0f172a, #1e293b, #334155, #64748b)
+   - Elegant pastel indicator tints (emerald, rose, amber, cyan, indigo)
+   ========================================================================== */
+
+html.light,
+body.light {
+  background-color: #f8fafc;
+  color: #0f172a;
+}
+
+/* Background surfaces */
+html.light .bg-slate-950,
+body.light .bg-slate-950,
+html.light [class*="bg-slate-950/"],
+body.light [class*="bg-slate-950/"] {
+  background-color: #ffffff !important;
+}
+
+html.light .bg-slate-900,
+body.light .bg-slate-900,
+html.light [class*="bg-slate-900/"],
+body.light [class*="bg-slate-900/"] {
+  background-color: #ffffff !important;
+}
+
+html.light .bg-slate-800,
+body.light .bg-slate-800,
+html.light [class*="bg-slate-800/"],
+body.light [class*="bg-slate-800/"] {
+  background-color: #f1f5f9 !important;
+}
+
+/* Border colors */
+html.light .border-slate-800,
+body.light .border-slate-800,
+html.light [class*="border-slate-800/"],
+body.light [class*="border-slate-800/"] {
+  border-color: #e2e8f0 !important;
+}
+
+html.light .border-slate-700,
+body.light .border-slate-700,
+html.light [class*="border-slate-700/"],
+body.light [class*="border-slate-700/"] {
+  border-color: #cbd5e1 !important;
+}
+
+/* Typography contrast */
+html.light .text-white,
+body.light .text-white {
+  color: #0f172a !important;
+}
+
+html.light .text-slate-100,
+body.light .text-slate-100 {
+  color: #0f172a !important;
+}
+
+html.light .text-slate-200,
+body.light .text-slate-200 {
+  color: #1e293b !important;
+}
+
+html.light .text-slate-300,
+body.light .text-slate-300 {
+  color: #334155 !important;
+}
+
+html.light .text-slate-400,
+body.light .text-slate-400 {
+  color: #64748b !important;
+}
+
+html.light .text-slate-500,
+body.light .text-slate-500 {
+  color: #64748b !important;
+}
+
+html.light .text-slate-600,
+body.light .text-slate-600 {
+  color: #94a3b8 !important;
+}
+
+/* Light mode card shadows */
+html.light .rounded-2xl.border,
+html.light .rounded-xl.border {
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05);
+}
+
+/* ==========================================================================
+   Smooth Status Badges & Alert Cards in Light Mode
+   Replace harsh dark-tinted backgrounds with soft, legible pastel tones
+   ========================================================================== */
+
+/* Emerald / Safe */
+html.light [class*="bg-emerald-950"],
+body.light [class*="bg-emerald-950"] {
+  background-color: #ecfdf5 !important;
+}
+html.light .text-emerald-300,
+body.light .text-emerald-300 {
+  color: #047857 !important;
+}
+html.light .text-emerald-400,
+body.light .text-emerald-400 {
+  color: #059669 !important;
+}
+html.light [class*="border-emerald-500/"],
+body.light [class*="border-emerald-500/"] {
+  border-color: #a7f3d0 !important;
+}
+
+/* Rose / Failures */
+html.light [class*="bg-rose-950"],
+body.light [class*="bg-rose-950"] {
+  background-color: #fff1f2 !important;
+}
+html.light .text-rose-300,
+body.light .text-rose-300 {
+  color: #be123c !important;
+}
+html.light .text-rose-400,
+body.light .text-rose-400 {
+  color: #e11d48 !important;
+}
+html.light [class*="border-rose-500/"],
+body.light [class*="border-rose-500/"] {
+  border-color: #fecdd3 !important;
+}
+
+/* Amber / Conflicts & Warnings */
+html.light [class*="bg-amber-950"],
+body.light [class*="bg-amber-950"] {
+  background-color: #fffbeb !important;
+}
+html.light .text-amber-300,
+body.light .text-amber-300 {
+  color: #b45309 !important;
+}
+html.light .text-amber-400,
+body.light .text-amber-400 {
+  color: #d97706 !important;
+}
+html.light [class*="border-amber-500/"],
+body.light [class*="border-amber-500/"] {
+  border-color: #fde68a !important;
+}
+
+/* Cyan / Static Analysis & Pseudo Builds */
+html.light [class*="bg-cyan-950"],
+body.light [class*="bg-cyan-950"] {
+  background-color: #ecfeff !important;
+}
+html.light .text-cyan-200,
+body.light .text-cyan-200 {
+  color: #0e7490 !important;
+}
+html.light .text-cyan-300,
+body.light .text-cyan-300 {
+  color: #0e7490 !important;
+}
+html.light .text-cyan-400,
+body.light .text-cyan-400 {
+  color: #0891b2 !important;
+}
+html.light [class*="border-cyan-500/"],
+body.light [class*="border-cyan-500/"] {
+  border-color: #a5f3fc !important;
+}
+
+/* Indigo / Gemini AI */
+html.light [class*="bg-indigo-950"],
+body.light [class*="bg-indigo-950"] {
+  background-color: #eef2ff !important;
+}
+html.light .text-indigo-400,
+body.light .text-indigo-400 {
+  color: #4f46e5 !important;
+}
+
+/* Inputs and Selects in Light Mode */
+html.light input[type="text"],
+html.light input[type="search"],
+html.light select {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+html.light input::placeholder {
+  color: #94a3b8 !important;
+}
+html.light select option {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
+/* Modals and Overlays in Light Mode */
+html.light .fixed.inset-0 .bg-slate-900,
+body.light .fixed.inset-0 .bg-slate-900 {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.25) !important;
+}

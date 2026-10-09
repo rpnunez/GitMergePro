@@ -21,6 +21,7 @@ import {
 } from './lib/firestoreService.ts';
 import { Repository, PullRequest, Issue, PseudoBuild, ChatMessage, UserSettings } from './types/index.ts';
 import { Navbar } from './components/Navbar.tsx';
+import { Sidebar } from './components/Sidebar.tsx';
 import { PullRequestsView } from './components/PullRequestsView.tsx';
 import { RebaseConflictModal } from './components/RebaseConflictModal.tsx';
 import { PseudoBuildView } from './components/PseudoBuildView.tsx';
@@ -51,6 +52,9 @@ export default function App() {
   // Tab State
   const [activeTab, setActiveTab] = useState<'prs' | 'pseudo' | 'issues' | 'chat' | 'settings'>('prs');
 
+  // Sidebar Menu State (visible by default)
+  const [isMenuOpen, setIsMenuOpen] = useState(true);
+
   // Repositories & Data States
   const [repositories, setRepositories] = useState<Repository[]>([INITIAL_DEMO_REPO]);
   const [activeRepo, setActiveRepo] = useState<Repository | null>(INITIAL_DEMO_REPO);
@@ -72,6 +76,27 @@ export default function App() {
   // Sync state & Background timer
   const [isSyncing, setIsSyncing] = useState(false);
   const [secondsUntilNextSync, setSecondsUntilNextSync] = useState(300);
+
+  // Dark / Light Mode Theme state
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    return (localStorage.getItem('app_theme') as 'dark' | 'light') || 'dark';
+  });
+
+  // Apply theme class to document element
+  useEffect(() => {
+    if (theme === 'light') {
+      document.documentElement.classList.add('light');
+      document.documentElement.classList.remove('dark');
+    } else {
+      document.documentElement.classList.add('dark');
+      document.documentElement.classList.remove('light');
+    }
+    localStorage.setItem('app_theme', theme);
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  }, []);
 
   // 1. Listen for Firebase Auth state changes
   useEffect(() => {
@@ -128,12 +153,16 @@ export default function App() {
         if (settings) {
           setUserSettings(settings);
           setSecondsUntilNextSync(settings.syncIntervalMinutes * 60);
+          if (settings.theme) {
+            setTheme(settings.theme);
+          }
         } else {
           const defaultSettings: UserSettings = {
             id: currentUid,
             userId: currentUid,
             syncIntervalMinutes: 5,
             autoRebaseCollisions: true,
+            theme: 'dark',
             updatedAt: new Date().toISOString(),
           };
           saveUserSettings(defaultSettings).catch(console.error);
@@ -489,15 +518,20 @@ export default function App() {
   };
 
   // Save User Settings
-  const handleSaveUserSettings = async (settings: { syncIntervalMinutes: number; autoRebaseCollisions: boolean }) => {
+  const handleSaveUserSettings = async (settings: { syncIntervalMinutes: number; autoRebaseCollisions: boolean; theme?: 'dark' | 'light' }) => {
     const currentUid = user?.uid || 'demo';
     const updated: UserSettings = {
       id: currentUid,
       userId: currentUid,
       syncIntervalMinutes: settings.syncIntervalMinutes,
       autoRebaseCollisions: settings.autoRebaseCollisions,
+      theme: settings.theme || theme,
       updatedAt: new Date().toISOString(),
     };
+
+    if (settings.theme) {
+      setTheme(settings.theme);
+    }
 
     if (user) {
       await saveUserSettings(updated);
@@ -516,7 +550,7 @@ export default function App() {
   const safeCount = useMemo(() => pulls.filter((p) => p.safeToMerge).length, [pulls]);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-slate-950">
+    <div className={`min-h-screen ${theme === 'light' ? 'bg-slate-50 text-slate-900' : 'bg-slate-950 text-slate-100'} flex flex-col font-sans selection:bg-emerald-500 selection:text-slate-950`}>
       {/* Top Navigation */}
       <Navbar
         user={user}
@@ -533,11 +567,31 @@ export default function App() {
         safeCount={safeCount}
         totalPrsCount={pulls.length}
         selectedPrCount={selectedPrIds.size}
-        onOpenPseudoModal={() => setActiveTab('pseudo')}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        isMenuOpen={isMenuOpen}
+        onToggleMenu={() => setIsMenuOpen((prev) => !prev)}
       />
 
-      {/* Main View Body */}
-      <main className="flex-1 mx-auto w-full max-w-7xl px-4 sm:px-6 py-6">
+      {/* App Body Layout: Sidebar + Main Content */}
+      <div className="flex-1 flex w-full relative">
+        <Sidebar
+          isOpen={isMenuOpen}
+          onClose={() => setIsMenuOpen(false)}
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          safeCount={safeCount}
+          totalPrsCount={pulls.length}
+          selectedPrCount={selectedPrIds.size}
+          isSyncing={isSyncing}
+          onSync={handleSyncCurrent}
+          lastSyncedText={lastSyncedText}
+          activeRepo={activeRepo}
+          theme={theme}
+        />
+
+        {/* Main View Body */}
+        <main className="flex-1 min-w-0 w-full px-4 sm:px-6 lg:px-8 py-6 max-w-7xl mx-auto transition-all">
         {/* Pull Requests Tab */}
         {activeTab === 'prs' && activeRepo && (
           <PullRequestsView
@@ -553,6 +607,7 @@ export default function App() {
             onBulkAddLabel={handleBulkAddLabel}
             onBulkClosePrs={handleBulkClosePrs}
             onBulkRebaseAll={handleBulkRebaseAll}
+            theme={theme}
           />
         )}
 
@@ -614,9 +669,12 @@ export default function App() {
             onSyncAll={handleSyncAll}
             isSyncing={isSyncing}
             userId={user?.uid || 'demo'}
+            theme={theme}
+            onThemeChange={(t) => setTheme(t)}
           />
         )}
       </main>
+      </div>
 
       {/* Modals */}
       {rebaseModalPr && activeRepo && (

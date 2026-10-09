@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { PromptBuilder, buildPrompt, getPromptConfig } from './PromptBuilder.ts';
 
 export const apiRouter = Router();
 
@@ -16,13 +17,6 @@ const getGeminiClient = () => {
   });
 };
 
-// System role prompts
-const ROLE_INSTRUCTIONS: Record<string, string> = {
-  merge_architect: `You are the Lead Merge Train Architect for a high-velocity engineering organization. Your primary objective is keeping the main branch green, minimizing integration queue latency, detecting cross-PR hazards, and optimizing PR batches for pseudo-builds. Be concise, technically precise, and actionable.`,
-  conflict_specialist: `You are a Git Rebase and Conflict Resolution Specialist. You analyze file collisions, 3-way merge markers (<<<<<<< HEAD, =======, >>>>>>>), AST changes, package-lock and imports conflicts. You provide concrete resolved code and safe rebase commands.`,
-  ci_diagnostician: `You are a GitHub Actions CI & Static Analysis Diagnostician. You pinpoint flaky tests, jest/vitest/playwright failures, TypeScript compilation bugs, and security/linter issues blocking PR merges. Give clear, fast debugging steps.`,
-};
-
 // 1. Multi-Turn Gemini Chat
 apiRouter.post('/chat', async (req: Request, res: Response) => {
   try {
@@ -37,16 +31,12 @@ apiRouter.post('/chat', async (req: Request, res: Response) => {
 
     const ai = getGeminiClient();
 
-    // Select system instruction
-    const baseInstruction = ROLE_INSTRUCTIONS[role] || ROLE_INSTRUCTIONS.merge_architect;
-    let systemInstruction = baseInstruction;
-
-    if (repoContext) {
-      systemInstruction += `\n\nActive Repository Context: ${repoContext.owner}/${repoContext.repo} (Target Branch: ${repoContext.defaultBranch || 'main'}).`;
-    }
-    if (prContext) {
-      systemInstruction += `\nInspecting Pull Request #${prContext.number}: "${prContext.title}". CI Status: ${prContext.ciStatus}. Conflicts: ${prContext.hasConflicts ? 'YES' : 'NONE'}. Static Analysis: ${prContext.staticAnalysisStatus}. Labels: ${prContext.automatedLabelsSummary || 'None'}.`;
-    }
+    // Build system instruction via centralized PromptBuilder
+    const systemInstruction = PromptBuilder.buildSystemInstruction({
+      role,
+      repoContext,
+      prContext,
+    });
 
     // Format contents history for Gemini
     const contents = messages.map((m: { role: string; content: string }) => ({
@@ -106,6 +96,196 @@ apiRouter.post('/chat', async (req: Request, res: Response) => {
   }
 });
 
+// GitHub API Client Utilities
+function getGitHubHeaders(githubToken?: string): Record<string, string> {
+  const token = githubToken || process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  const headers: Record<string, string> = {
+    'Accept': 'application/vnd.github.v3+json',
+    'User-Agent': 'GitMergePro-Applet',
+  };
+  if (token) {
+    headers['Authorization'] = `token ${token}`;
+  }
+  return headers;
+}
+
+async function fetchGitHubPrDetails(owner: string, repo: string, prNumber: number | string, githubToken?: string) {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`, {
+      headers: getGitHubHeaders(githubToken),
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    console.warn(`Error fetching PR #${prNumber} details from GitHub:`, err);
+  }
+  return null;
+}
+
+async function fetchGitHubPrFiles(owner: string, repo: string, prNumber: number | string, githubToken?: string) {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=100`, {
+      headers: getGitHubHeaders(githubToken),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        return data;
+      }
+    }
+  } catch (err) {
+    console.warn(`Error fetching PR #${prNumber} files from GitHub:`, err);
+  }
+  return [];
+}
+
+async function fetchGitHubFileContent(
+  owner: string,
+  repo: string,
+  path: string,
+  ref: string,
+  githubToken?: string
+): Promise<string | null> {
+  if (!owner || !repo || !path || !ref) return null;
+  const cleanPath = path.startsWith('/') ? path.slice(1) : path;
+  const headers = getGitHubHeaders(githubToken);
+  headers['Accept'] = 'application/vnd.github.v3.raw';
+
+  try {
+    const url = `https://api.github.com/repos/${owner}/${repo}/contents/${cleanPath}?ref=${encodeURIComponent(ref)}`;
+    const res = await fetch(url, { headers });
+    if (res.ok) {
+      return await res.text();
+    }
+  } catch (err) {
+    // fallback
+  }
+
+  try {
+    const rawHeaders: Record<string, string> = { 'User-Agent': 'GitMergePro-Applet' };
+    const token = githubToken || process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+    if (token) rawHeaders['Authorization'] = `token ${token}`;
+    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(ref)}/${cleanPath}`;
+    const rawRes = await fetch(rawUrl, { headers: rawHeaders });
+    if (rawRes.ok) {
+      return await rawRes.text();
+    }
+  } catch (err) {
+    // ignore
+  }
+
+  return null;
+}
+
+function analyzeCollisionType(
+  filename: string,
+  patch: string = '',
+  headContent?: string,
+  baseContent?: string
+): string {
+  const ext = filename.split('.').pop()?.toLowerCase();
+
+  if (ext === 'json') {
+    if (filename.includes('package.json')) return 'Package Dependencies & Scripts Collision';
+    if (filename.includes('tsconfig')) return 'TypeScript Configuration Conflict';
+    return 'JSON Configuration & Schema Collision';
+  }
+  if (ext === 'yaml' || ext === 'yml') {
+    if (filename.includes('workflow') || filename.includes('ci')) return 'CI/CD Pipeline & Action Collision';
+    return 'YAML Manifest & Config Collision';
+  }
+  if (ext === 'sql') {
+    return 'Database Migration DDL & Index Collision';
+  }
+  if (ext === 'md' || ext === 'txt') {
+    return 'Documentation & Markdown Section Overlap';
+  }
+  if (ext === 'ts' || ext === 'tsx' || ext === 'js' || ext === 'jsx') {
+    if (patch.includes('import ') || patch.includes('export ')) {
+      return 'Module Export & Import Namespace Collision';
+    }
+    if (patch.includes('interface ') || patch.includes('type ')) {
+      return 'TypeScript Interface & Type Signature Collision';
+    }
+    if (patch.includes('useEffect') || patch.includes('useState') || patch.includes('useMemo')) {
+      return 'React Hook & State Lifecycle Collision';
+    }
+    if (patch.includes('class ') || patch.includes('constructor(')) {
+      return 'Class Implementation & Inheritance Collision';
+    }
+    return 'AST Function & Signature Collision';
+  }
+  if (ext === 'py') {
+    if (patch.includes('def ') || patch.includes('class ')) return 'Python Method & Class Contract Collision';
+    if (patch.includes('import ') || patch.includes('from ')) return 'Python Import & Dependency Collision';
+    return 'Python Logic & Statement Collision';
+  }
+  if (ext === 'go') {
+    return 'Go Struct & Package Function Collision';
+  }
+  if (ext === 'rs') {
+    return 'Rust Trait & Implementation Collision';
+  }
+  if (ext === 'php') {
+    if (patch.includes('add_action') || patch.includes('add_filter') || patch.includes('wp_')) {
+      return 'WordPress Hook & Action Collision';
+    }
+    return 'PHP Class Method & Interface Collision';
+  }
+  if (ext === 'css' || ext === 'scss') {
+    return 'CSS Rule & Style Selector Collision';
+  }
+
+  return 'Concurrent AST Modifications Collision';
+}
+
+function parseUnifiedDiffPatch(
+  patch: string,
+  filename: string,
+  targetBranch: string,
+  headBranch: string,
+  prNumber: number | string
+) {
+  const lines = patch.split('\n');
+  const targetLines: string[] = [];
+  const incomingLines: string[] = [];
+  const resolvedLines: string[] = [];
+
+  let isHeader = true;
+  for (const line of lines) {
+    if (line.startsWith('@@')) {
+      isHeader = false;
+      continue;
+    }
+    if (isHeader) continue;
+
+    if (line.startsWith('-')) {
+      targetLines.push(line.slice(1));
+    } else if (line.startsWith('+')) {
+      incomingLines.push(line.slice(1));
+      resolvedLines.push(line.slice(1));
+    } else {
+      const trimmedLine = line.startsWith(' ') ? line.slice(1) : line;
+      targetLines.push(trimmedLine);
+      incomingLines.push(trimmedLine);
+      resolvedLines.push(trimmedLine);
+    }
+  }
+
+  const targetConflictSnippet = targetLines.join('\n') || `// Target branch (${targetBranch}) state for ${filename}`;
+  const incomingConflictSnippet = incomingLines.join('\n') || `// PR #${prNumber} (${headBranch}) state for ${filename}`;
+  const resolvedSnippet = resolvedLines.join('\n') || incomingConflictSnippet;
+  const collisionType = analyzeCollisionType(filename, patch);
+
+  return {
+    collisionType,
+    targetConflictSnippet,
+    incomingConflictSnippet,
+    resolvedSnippet,
+  };
+}
+
 // 2. Automated Conflict Resolution & Rebase Engine
 apiRouter.post('/rebase-conflicts', async (req: Request, res: Response) => {
   try {
@@ -113,55 +293,47 @@ apiRouter.post('/rebase-conflicts', async (req: Request, res: Response) => {
       owner = '',
       repo = '',
       prNumber,
-      title,
+      title = '',
       headBranch = 'feature-branch',
       targetBranch = 'main',
       conflictedFiles = [],
+      githubToken,
     } = req.body;
 
     const repoSlug = owner && repo ? `${owner}/${repo}` : (repo || 'repository');
     const ai = getGeminiClient();
 
-    // Ensure we have files to resolve
-    const filesToResolve: string[] = Array.isArray(conflictedFiles) && conflictedFiles.length > 0
+    // Fetch real files for this PR from GitHub if none were provided
+    let filesToResolve: string[] = Array.isArray(conflictedFiles) && conflictedFiles.length > 0
       ? conflictedFiles
-      : getRealisticFilesForRepoAndPr(owner, repo, title, headBranch);
+      : [];
 
-    // Run resolution simulation
-    const prompt = `You are an automated Git rebase and AST collision resolver engine for repository "${repoSlug}".
-Pull Request #${prNumber}: "${title}" (source branch "${headBranch}") has merge conflicts rebasing onto "${targetBranch}".
-The conflicted files from this pull request are: ${JSON.stringify(filesToResolve)}
-
-Task:
-1. Provide a rebase plan that resolves simple file collisions for these exact files (imports/requires, non-overlapping functions, dependency bumps, configuration keys).
-2. For each conflicted file in this PR, generate an explanation of what collided and the cleanly resolved merged file representation appropriate for the file extension and language (e.g. PHP if .php, TS/JS if .ts/.tsx, Python if .py, etc.).
-3. Provide the exact safe git command sequence to rebase ${headBranch} onto ${targetBranch} cleanly.
-
-Respond with JSON in the following schema:
-{
-  "success": true,
-  "rebaseMethod": "3-Way Semantic Rebase with AST & Import De-duplication",
-  "filesResolved": [
-    {
-      "file": "string",
-      "collisionType": "imports | function_overlap | config_bump | duplicate_keys",
-      "resolutionSummary": "string",
-      "resolvedSnippet": "string"
+    if (filesToResolve.length === 0 && owner && repo && prNumber) {
+      const ghFiles = await fetchGitHubPrFiles(owner, repo, prNumber, githubToken);
+      filesToResolve = ghFiles.map((f: any) => f.filename).filter(Boolean);
     }
-  ],
-  "gitCommands": ["git fetch origin", "git checkout ...", "git rebase ..."],
-  "cleanMergabilityScore": 98,
-  "confidenceNotes": "string"
-}`;
+
+    if (filesToResolve.length === 0) {
+      filesToResolve = ['README.md'];
+    }
+
+    // Run resolution simulation using centralized PromptBuilder
+    const prompt = buildPrompt('rebase-conflicts', {
+      repoSlug,
+      prNumber,
+      title,
+      headBranch,
+      targetBranch,
+      filesToResolve,
+    });
+    const promptConfig = getPromptConfig('rebase-conflicts');
 
     let resolvedData: any = null;
     try {
       const result = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
         contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-        },
+        config: promptConfig,
       });
 
       resolvedData = JSON.parse(result.text || '{}');
@@ -172,17 +344,8 @@ Respond with JSON in the following schema:
         success: true,
         rebaseMethod: 'Algorithmic 3-Way AST Merge',
         filesResolved: filesToResolve.map((file: string) => {
-          const isPhp = file.endsWith('.php');
-          const isJson = file.endsWith('.json');
-          const isPy = file.endsWith('.py');
-          const collisionType = isJson ? 'config_bump' : (isPhp ? 'function_overlap' : 'imports');
-          
-          let resolvedSnippet = `// Reconciled changes in ${file}\n// Target: ${targetBranch} <- PR #${prNumber} (${headBranch})`;
-          if (isPhp) {
-            resolvedSnippet = `<?php\n// Reconciled namespace imports and class methods in ${file}\n// Target: ${targetBranch} <- PR #${prNumber} (${headBranch})\nnamespace ${repo.replace(/[^a-zA-Z0-9]/g, '_') || 'App'};\n// Cleanly merged function definitions without collision`;
-          } else if (isPy) {
-            resolvedSnippet = `# Reconciled imports and function definitions in ${file}\n# Target: ${targetBranch} <- PR #${prNumber} (${headBranch})`;
-          }
+          const collisionType = analyzeCollisionType(file);
+          const resolvedSnippet = `// Reconciled changes in ${file}\n// Target: ${targetBranch} <- PR #${prNumber} (${headBranch})\n// Cleanly merged modifications without regression`;
 
           return {
             file,
@@ -211,63 +374,32 @@ Respond with JSON in the following schema:
   }
 });
 
-// 2b. Fetch Live or Tailored PR Files
+// 2b. Fetch Live PR Files directly from GitHub
 apiRouter.post('/pr-files', async (req: Request, res: Response) => {
   try {
-    const { owner, repo, prNumber, title = '', headBranch = '', githubToken } = req.body;
+    const { owner, repo, prNumber, githubToken } = req.body;
 
     if (!owner || !repo || !prNumber) {
       return res.status(400).json({ error: 'Owner, repo, and prNumber are required' });
     }
 
-    const headers: Record<string, string> = {
-      'Accept': 'application/vnd.github.v3+json',
-      'User-Agent': 'GitMergePro-Applet',
-    };
-    if (githubToken) {
-      headers['Authorization'] = `token ${githubToken}`;
-    }
+    const ghFiles = await fetchGitHubPrFiles(owner, repo, prNumber, githubToken);
 
-    let files: Array<{ filename: string; status: string; additions: number; deletions: number; changes: number }> = [];
-    let isLive = false;
-
-    try {
-      const pullsFilesRes = await fetch(
-        `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=30`,
-        { headers }
-      );
-      if (pullsFilesRes.ok) {
-        const ghFiles = await pullsFilesRes.json();
-        if (Array.isArray(ghFiles) && ghFiles.length > 0) {
-          files = ghFiles.map((f: any) => ({
-            filename: f.filename,
-            status: f.status || 'modified',
-            additions: f.additions || 0,
-            deletions: f.deletions || 0,
-            changes: f.changes || (f.additions || 0) + (f.deletions || 0),
-          }));
-          isLive = true;
-        }
-      }
-    } catch (err) {
-      console.warn('GitHub API PR files fetch notice:', err);
-    }
-
-    // Fallback if not returned by GitHub (private repo without token, rate limit, or demo repo)
-    if (files.length === 0) {
-      const generatedFileNames = getRealisticFilesForRepoAndPr(owner, repo, title, headBranch);
-      files = generatedFileNames.map((fn, idx) => ({
-        filename: fn,
-        status: 'modified',
-        additions: 12 + idx * 8,
-        deletions: 3 + idx * 2,
-        changes: 15 + idx * 10,
-      }));
-    }
+    const files = ghFiles.map((f: any) => ({
+      filename: f.filename,
+      status: f.status || 'modified',
+      additions: f.additions || 0,
+      deletions: f.deletions || 0,
+      changes: f.changes || (f.additions || 0) + (f.deletions || 0),
+      patch: f.patch || '',
+      raw_url: f.raw_url || '',
+      contents_url: f.contents_url || '',
+      sha: f.sha || '',
+    }));
 
     res.json({
       success: true,
-      isLive,
+      isLive: files.length > 0,
       owner,
       repo,
       prNumber,
@@ -276,7 +408,149 @@ apiRouter.post('/pr-files', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('pr-files error:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch PR files' });
+    res.status(500).json({ error: error.message || 'Failed to fetch PR files from GitHub' });
+  }
+});
+
+// 2c. Fetch Concrete File Diff & Real AST Details for Tree Visualizer directly from GitHub
+apiRouter.post('/pr-file-diff', async (req: Request, res: Response) => {
+  try {
+    const {
+      owner = '',
+      repo = '',
+      prNumber,
+      filename = '',
+      title = '',
+      headBranch = 'feature',
+      targetBranch = 'main',
+      githubToken,
+    } = req.body;
+
+    if (!owner || !repo || !prNumber || !filename) {
+      return res.status(400).json({ error: 'owner, repo, prNumber, and filename are required' });
+    }
+
+    // 1. Fetch real PR details from GitHub
+    const prDetails = await fetchGitHubPrDetails(owner, repo, prNumber, githubToken);
+    const realHeadBranch = prDetails?.head?.ref || headBranch;
+    const realTargetBranch = prDetails?.base?.ref || targetBranch;
+    const headSha = prDetails?.head?.sha;
+    const baseSha = prDetails?.base?.sha;
+
+    // 2. Fetch real changed files for this PR from GitHub
+    const ghFiles = await fetchGitHubPrFiles(owner, repo, prNumber, githubToken);
+    const ghFileMatch = ghFiles.find(
+      (f: any) =>
+        f.filename === filename ||
+        f.filename.endsWith(`/${filename}`) ||
+        filename.endsWith(`/${f.filename}`)
+    );
+
+    let rawPatch = ghFileMatch?.patch || '';
+    let targetConflictSnippet = '';
+    let incomingConflictSnippet = '';
+    let resolvedSnippet = '';
+    let collisionType = 'Concurrent Modifications';
+    const status = ghFileMatch?.status || 'modified';
+    const additions = ghFileMatch?.additions || 0;
+    const deletions = ghFileMatch?.deletions || 0;
+    const changes = ghFileMatch?.changes || (additions + deletions);
+
+    // 3. If unified diff patch is provided by GitHub, parse authentic diff hunks
+    if (rawPatch) {
+      const parsed = parseUnifiedDiffPatch(rawPatch, filename, realTargetBranch, realHeadBranch, prNumber);
+      targetConflictSnippet = parsed.targetConflictSnippet;
+      incomingConflictSnippet = parsed.incomingConflictSnippet;
+      resolvedSnippet = parsed.resolvedSnippet;
+      collisionType = parsed.collisionType;
+    } else {
+      // 4. Fetch the real source code directly from GitHub at head and base revisions
+      const [headContent, baseContent] = await Promise.all([
+        fetchGitHubFileContent(owner, repo, ghFileMatch?.filename || filename, headSha || realHeadBranch, githubToken),
+        fetchGitHubFileContent(owner, repo, ghFileMatch?.filename || filename, baseSha || realTargetBranch, githubToken),
+      ]);
+
+      if (headContent || baseContent) {
+        if (status === 'added') {
+          targetConflictSnippet = `// File newly created in PR #${prNumber} on branch ${realHeadBranch}\n// (Not present on target branch ${realTargetBranch})`;
+          incomingConflictSnippet = (headContent || '').slice(0, 3000);
+          resolvedSnippet = incomingConflictSnippet;
+          rawPatch = `@@ -0,0 +1,${incomingConflictSnippet.split('\n').length} @@\n${incomingConflictSnippet.split('\n').map((l) => '+' + l).join('\n')}`;
+        } else if (status === 'removed') {
+          targetConflictSnippet = (baseContent || '').slice(0, 3000);
+          incomingConflictSnippet = `// File removed in PR #${prNumber}`;
+          resolvedSnippet = `// File deletion confirmed in PR #${prNumber}`;
+          rawPatch = `@@ -1,${targetConflictSnippet.split('\n').length} +0,0 @@\n${targetConflictSnippet.split('\n').map((l) => '-' + l).join('\n')}`;
+        } else {
+          targetConflictSnippet = (baseContent || '').slice(0, 3000) || `// Target branch (${realTargetBranch}) content for ${filename}`;
+          incomingConflictSnippet = (headContent || '').slice(0, 3000) || `// PR #${prNumber} (${realHeadBranch}) content for ${filename}`;
+          resolvedSnippet = incomingConflictSnippet;
+          rawPatch = `@@ -1,10 +1,15 @@ in ${filename}\n${incomingConflictSnippet.slice(0, 300)}`;
+        }
+        collisionType = analyzeCollisionType(filename, rawPatch, headContent || undefined, baseContent || undefined);
+      } else if (!ghFileMatch) {
+        return res.status(404).json({
+          error: `File "${filename}" was not found in Pull Request #${prNumber} on GitHub repository ${owner}/${repo}.`,
+        });
+      }
+    }
+
+    // 5. Optional Gemini AI enhancement strictly on real code diff
+    try {
+      const ai = getGeminiClient();
+      const prompt = buildPrompt('pr-file-diff', {
+        owner,
+        repo,
+        prNumber,
+        title: title || prDetails?.title || '',
+        headBranch: realHeadBranch,
+        targetBranch: realTargetBranch,
+        filename,
+        rawPatch,
+        targetContent: targetConflictSnippet,
+        incomingContent: incomingConflictSnippet,
+      });
+      const promptConfig = getPromptConfig('pr-file-diff');
+
+      const aiRes = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: prompt,
+        config: promptConfig,
+      });
+
+      const aiParsed = JSON.parse(aiRes.text || '{}');
+      if (aiParsed && aiParsed.targetConflictSnippet && aiParsed.incomingConflictSnippet) {
+        if (aiParsed.resolvedSnippet) resolvedSnippet = aiParsed.resolvedSnippet;
+        if (aiParsed.collisionType) collisionType = aiParsed.collisionType;
+      }
+    } catch (aiErr) {
+      // Continue with authentic GitHub parsed diff
+    }
+
+    return res.json({
+      success: true,
+      isLiveFromGitHub: true,
+      filename: ghFileMatch?.filename || filename,
+      status,
+      additions,
+      deletions,
+      changes,
+      rawPatch,
+      collisionType,
+      targetConflictSnippet,
+      incomingConflictSnippet,
+      resolvedSnippet,
+      headBranch: realHeadBranch,
+      targetBranch: realTargetBranch,
+      prDetails: prDetails ? {
+        mergeable: prDetails.mergeable,
+        mergeable_state: prDetails.mergeable_state,
+        html_url: prDetails.html_url,
+      } : undefined,
+    });
+  } catch (error: any) {
+    console.error('pr-file-diff error:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch PR file diff from GitHub' });
   }
 });
 
@@ -304,37 +578,20 @@ apiRouter.post('/pseudo-build', async (req: Request, res: Response) => {
       };
     });
 
-    const prompt = `You are evaluating a multi-PR "Pseudo Build" merge train simulation for repo "${repo}".
-Target branch: "${targetBranch}".
-Selected PRs to merge simultaneously into a composite build:
-${JSON.stringify(prSummaries, null, 2)}
-
-Analyze:
-1. Inter-PR file collision risk (do multiple PRs modify overlapping files in this repo?).
-2. CI status risk (are all CI test suites passing?).
-3. Recommended merge sequence order.
-4. Summary evaluation.
-
-Respond with JSON format:
-{
-  "canMergeAll": true/false,
-  "riskLevel": "LOW" | "MEDIUM" | "HIGH" | "BLOCKING",
-  "mergeOrder": [101, 102],
-  "collisionsFound": [
-    { "file": "string", "prsInvolved": [101, 102], "resolution": "string" }
-  ],
-  "summary": "Full markdown-friendly pseudo build report",
-  "safeToDeploy": true/false
-}`;
+    // Build pseudo build simulation prompt via centralized PromptBuilder
+    const prompt = buildPrompt('pseudo-build', {
+      repo,
+      targetBranch,
+      prSummaries,
+    });
+    const promptConfig = getPromptConfig('pseudo-build');
 
     let simulationResult: any = null;
     try {
       const result = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
         contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-        },
+        config: promptConfig,
       });
       simulationResult = JSON.parse(result.text || '{}');
     } catch (e) {
@@ -389,69 +646,55 @@ apiRouter.post('/sync-github', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Owner and repo are required' });
     }
 
-    const headers: Record<string, string> = {
-      'Accept': 'application/vnd.github.v3+json',
-      'User-Agent': 'GitMergePro-Applet',
-    };
-    if (githubToken) {
-      headers['Authorization'] = `token ${githubToken}`;
-    }
+    const headers = getGitHubHeaders(githubToken);
 
     let rawPulls: any[] = [];
     let rawIssues: any[] = [];
     let isLiveGitHub = false;
 
-    try {
-      const pullsRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls?state=open&per_page=15`, { headers });
-      if (pullsRes.ok) {
-        rawPulls = await pullsRes.json();
-        isLiveGitHub = true;
-      }
-
-      const issuesRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=15`, { headers });
-      if (issuesRes.ok) {
-        const issuesData = await issuesRes.json();
-        // GitHub API returns PRs in issues endpoint as well; filter them out
-        rawIssues = issuesData.filter((i: any) => !i.pull_request);
-      }
-    } catch (fetchErr) {
-      console.warn('Direct GitHub API fetch warning:', fetchErr);
+    const pullsRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls?state=open&per_page=30`, { headers });
+    if (pullsRes.ok) {
+      rawPulls = await pullsRes.json();
+      isLiveGitHub = true;
+    } else if (pullsRes.status === 403) {
+      return res.status(429).json({
+        error: 'GitHub API rate limit exceeded. Please configure a GitHub Token in Settings to sync and view live repositories.',
+      });
+    } else if (pullsRes.status === 404) {
+      return res.status(404).json({
+        error: `Repository "${owner}/${repo}" was not found on GitHub.`,
+      });
     }
 
-    const prSource = rawPulls.length > 0 ? rawPulls : generateHighVelocityPRs(owner, repo);
+    const issuesRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=30`, { headers });
+    if (issuesRes.ok) {
+      const issuesData = await issuesRes.json();
+      rawIssues = Array.isArray(issuesData) ? issuesData.filter((i: any) => !i.pull_request) : [];
+    }
 
-    // If live GitHub, fetch real changed files for each PR concurrently
-    let prFilesMap: Record<number, string[]> = {};
+    // Fetch real changed files and stats for each PR concurrently directly from GitHub
+    let prFilesMap: Record<number, { files: string[]; additions: number; deletions: number }> = {};
     if (isLiveGitHub && rawPulls.length > 0) {
       await Promise.all(
-        rawPulls.slice(0, 10).map(async (p: any) => {
+        rawPulls.slice(0, 15).map(async (p: any) => {
           try {
-            const filesRes = await fetch(
-              `https://api.github.com/repos/${owner}/${repo}/pulls/${p.number}/files?per_page=20`,
-              { headers }
-            );
-            if (filesRes.ok) {
-              const filesJson = await filesRes.json();
-              if (Array.isArray(filesJson) && filesJson.length > 0) {
-                prFilesMap[p.number] = filesJson.map((f: any) => f.filename).filter(Boolean);
-              }
+            const filesJson = await fetchGitHubPrFiles(owner, repo, p.number, githubToken);
+            if (Array.isArray(filesJson) && filesJson.length > 0) {
+              const files = filesJson.map((f: any) => f.filename).filter(Boolean);
+              const additions = filesJson.reduce((acc: number, f: any) => acc + (Number(f.additions) || 0), 0);
+              const deletions = filesJson.reduce((acc: number, f: any) => acc + (Number(f.deletions) || 0), 0);
+              prFilesMap[p.number] = { files, additions, deletions };
             }
           } catch (e) {
-            // Silently fall through to repo-specific generator
+            // Silently fall through
           }
         })
       );
     }
 
-    // Process high-velocity PR data with genuine repository-specific files
-    const pulls = prSource.map((p: any, idx: number) => {
-      // Compute CI and static analysis
-      const ciOptions = ['passing', 'passing', 'passing', 'failing', 'pending'];
-      const ciStatus = p.ciStatus || ciOptions[idx % ciOptions.length];
-      const saOptions = ['clean', 'clean', 'warnings', 'clean', 'errors'];
-      const staticAnalysisStatus = p.staticAnalysisStatus || saOptions[idx % saOptions.length];
-      
-      // Determine conflicts: check GitHub mergeable flag if present, else alternate for high-velocity simulation
+    // Process real PR data from GitHub
+    const pulls = (Array.isArray(rawPulls) ? rawPulls : []).map((p: any, idx: number) => {
+      // Determine conflicts directly from GitHub mergeable status
       let hasConflicts = false;
       if (p.mergeable !== undefined && p.mergeable !== null) {
         hasConflicts = p.mergeable === false;
@@ -459,13 +702,12 @@ apiRouter.post('/sync-github', async (req: Request, res: Response) => {
         hasConflicts = true;
       } else if (p.hasConflicts !== undefined) {
         hasConflicts = Boolean(p.hasConflicts);
-      } else {
-        hasConflicts = (idx === 2 || idx === 5);
       }
 
-      const safeToMerge = ciStatus === 'passing' && (staticAnalysisStatus === 'clean' || staticAnalysisStatus === 'warnings') && !hasConflicts;
+      const ciStatus = p.ciStatus || 'passing';
+      const staticAnalysisStatus = p.staticAnalysisStatus || 'clean';
+      const safeToMerge = !hasConflicts && ciStatus === 'passing';
 
-      // Automated prioritization labels
       const labels: string[] = [];
       if (safeToMerge) {
         labels.push('safe-to-merge:green');
@@ -473,62 +715,55 @@ apiRouter.post('/sync-github', async (req: Request, res: Response) => {
       } else {
         if (hasConflicts) labels.push('blocked:merge-conflict');
         if (ciStatus === 'failing') labels.push('blocked:ci-failure');
-        if (ciStatus === 'pending') labels.push('ci:in-progress');
-        if (staticAnalysisStatus === 'errors') labels.push('blocked:linter-error');
-      }
-      if (idx % 3 === 0) labels.push('high-velocity:fast-track');
-      if (idx === 1) labels.push('critical:security');
-
-      // Get real files for THIS specific PR
-      const prNum = p.number || 100 + idx;
-      let prFiles = prFilesMap[prNum] || [];
-      if (!prFiles || prFiles.length === 0) {
-        prFiles = getRealisticFilesForRepoAndPr(owner, repo, p.title, p.head?.ref);
       }
 
-      // If PR has conflicts, the conflicted files are a subset of THIS PR's files
-      const conflictedFiles = hasConflicts
-        ? prFiles.slice(0, Math.min(3, prFiles.length))
-        : [];
+      // Real files and change stats for this PR from GitHub
+      const prData = prFilesMap[p.number];
+      const prFiles = prData?.files || [];
+      const filesChanged = prData?.files ? prData.files.length : (p.changed_files ?? 1);
+      const additions = prData ? prData.additions : (Number(p.additions) || 120);
+      const deletions = prData ? prData.deletions : (Number(p.deletions) || 45);
 
       return {
-        number: prNum,
+        number: p.number,
         title: (p.title || 'Untitled PR').slice(0, 500),
-        author: (p.user?.login || p.author || `engineer-${idx + 1}`).slice(0, 120),
+        author: (p.user?.login || 'contributor').slice(0, 120),
         authorAvatar: (p.user?.avatar_url || `https://api.dicebear.com/7.x/bottts/svg?seed=eng-${idx}`).slice(0, 500),
-        headBranch: (p.head?.ref || `feat/patch-${idx + 1}`).slice(0, 200),
+        headBranch: (p.head?.ref || `patch-${p.number}`).slice(0, 200),
         baseBranch: (p.base?.ref || 'main').slice(0, 100),
-        status: (p.state || p.status || 'open').slice(0, 30),
+        status: (p.state || 'open').slice(0, 30),
         ciStatus,
         staticAnalysisStatus,
-        hasConflicts: Boolean(hasConflicts),
-        conflictedFilesSummary: conflictedFiles.join(', ').slice(0, 1000),
-        safeToMerge: Boolean(safeToMerge),
-        mergeConfidenceScore: Number(safeToMerge ? 96 - (idx * 2) : 35),
+        hasConflicts,
+        conflictedFilesSummary: (prFiles.length > 0 ? prFiles.join(', ') : '').slice(0, 1000),
+        filesChanged,
+        additions,
+        deletions,
+        safeToMerge,
+        mergeConfidenceScore: safeToMerge ? 96 : 35,
         automatedLabelsSummary: labels.join(', ').slice(0, 500),
-        updatedAt: p.updated_at || new Date(Date.now() - idx * 1800000).toISOString(),
-        createdAt: p.created_at || new Date(Date.now() - (idx + 1) * 86400000).toISOString(),
+        updatedAt: p.updated_at || new Date().toISOString(),
+        createdAt: p.created_at || new Date().toISOString(),
       };
     });
 
-    // Process or synthesize issues data
-    const issues = (rawIssues.length > 0 ? rawIssues : generateHighVelocityIssues(owner, repo)).map((iss: any, idx: number) => {
-      const priorityScore = 100 - (idx * 12);
+    const issues = (Array.isArray(rawIssues) ? rawIssues : []).map((iss: any, idx: number) => {
+      const priorityScore = 100 - (idx * 10);
       const labels: string[] = ['triage:automated'];
       if (priorityScore > 80) labels.push('p0-critical');
       else if (priorityScore > 50) labels.push('p1-urgent');
       else labels.push('p2-standard');
 
       return {
-        number: iss.number || 400 + idx,
+        number: iss.number,
         title: (iss.title || 'Issue').slice(0, 500),
-        author: (iss.user?.login || iss.author || `dev-${idx}`).slice(0, 120),
-        state: (iss.state || 'open').slice(0, 30),
-        commentsCount: Number(iss.comments || Math.floor(Math.random() * 8)),
+        author: (iss.user?.login || 'contributor').slice(0, 120),
+        state: iss.state || 'open',
+        commentsCount: Number(iss.comments || 0),
         priorityScore,
         automatedLabelsSummary: labels.join(', ').slice(0, 500),
-        createdAt: iss.created_at || new Date(Date.now() - (idx + 2) * 86400000).toISOString(),
-        updatedAt: iss.updated_at || new Date(Date.now() - idx * 3600000).toISOString(),
+        createdAt: iss.created_at || new Date().toISOString(),
+        updatedAt: iss.updated_at || new Date().toISOString(),
       };
     });
 
@@ -546,96 +781,3 @@ apiRouter.post('/sync-github', async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message || 'Sync failed' });
   }
 });
-
-// Helper: Generate realistic, domain-specific files for ANY repository and PR topic
-function getRealisticFilesForRepoAndPr(owner: string = '', repo: string = '', prTitle: string = '', headBranch: string = ''): string[] {
-  const repoLower = (repo || '').toLowerCase();
-  const titleLower = (prTitle || '').toLowerCase();
-
-  // WordPress / PHP plugin repositories (e.g. wp-ai-scheduler)
-  if (repoLower.includes('wp') || repoLower.includes('wordpress') || repoLower.includes('plugin') || repoLower.includes('scheduler')) {
-    const mainPluginFile = `${repoLower.replace(/[^a-z0-9_-]/g, '-')}.php`;
-    if (titleLower.includes('cron') || titleLower.includes('schedule') || titleLower.includes('queue')) {
-      return [mainPluginFile, 'includes/class-scheduler-cron.php', 'includes/class-task-runner.php'];
-    }
-    if (titleLower.includes('ai') || titleLower.includes('gemini') || titleLower.includes('model') || titleLower.includes('prompt')) {
-      return [mainPluginFile, 'includes/api/class-gemini-client.php'];
-    }
-    if (titleLower.includes('admin') || titleLower.includes('ui') || titleLower.includes('settings')) {
-      return ['templates/admin-dashboard.php', 'assets/js/admin-scheduler.js', 'assets/css/admin.css'];
-    }
-    if (titleLower.includes('db') || titleLower.includes('sql') || titleLower.includes('migrat')) {
-      return ['includes/class-db-manager.php', mainPluginFile];
-    }
-    return [mainPluginFile, 'includes/class-scheduler-core.php'];
-  }
-
-  // React / Facebook React
-  if (repoLower === 'react' || repoLower.includes('react-dom') || repoLower.includes('react-native')) {
-    if (titleLower.includes('hook') || titleLower.includes('state')) {
-      return ['packages/react/src/ReactHooks.js', 'packages/react-reconciler/src/ReactFiberHooks.js'];
-    }
-    if (titleLower.includes('fiber') || titleLower.includes('work') || titleLower.includes('render')) {
-      return ['packages/react-reconciler/src/ReactFiberWorkLoop.js', 'packages/react-reconciler/src/ReactFiberBeginWork.js'];
-    }
-    if (titleLower.includes('schedule') || titleLower.includes('priority')) {
-      return ['packages/scheduler/src/Scheduler.js', 'packages/scheduler/src/forks/SchedulerDOM.js'];
-    }
-    if (titleLower.includes('event') || titleLower.includes('dom')) {
-      return ['packages/react-dom/src/client/ReactDOMRoot.js', 'packages/react-dom/src/events/DOMPluginEventSystem.js'];
-    }
-    return ['packages/react/src/React.js', 'packages/react-reconciler/src/ReactFiberWorkLoop.js'];
-  }
-
-  // Python / ML / Backend
-  if (repoLower.includes('python') || repoLower.includes('py') || repoLower.includes('django') || repoLower.includes('fastapi') || repoLower.includes('flask')) {
-    if (titleLower.includes('auth') || titleLower.includes('user') || titleLower.includes('token')) {
-      return [`${repoLower}/auth/security.py`, `${repoLower}/api/auth_router.py`];
-    }
-    if (titleLower.includes('model') || titleLower.includes('pipeline') || titleLower.includes('infer')) {
-      return [`${repoLower}/models/pipeline.py`, `${repoLower}/core/inference.py`];
-    }
-    return [`${repoLower}/main.py`, `${repoLower}/core/engine.py`];
-  }
-
-  // Go repositories
-  if (repoLower.includes('go') || repoLower.includes('k8s') || repoLower.includes('kube') || repoLower.includes('docker')) {
-    return [`cmd/${repoLower}/main.go`, `pkg/controller/reconciler.go`];
-  }
-
-  // Generic fallback derived purely from the target repo name and PR title
-  const slug = prTitle
-    .replace(/[^a-zA-Z0-9]/g, '_')
-    .toLowerCase()
-    .slice(0, 24)
-    .replace(/^_+|_+$/g, '');
-
-  return [
-    `lib/${slug || 'feature'}.ts`,
-    `src/core/${repoLower.replace(/[^a-z0-9_-]/g, '_')}_service.ts`,
-  ];
-}
-
-// Helper generators for high-velocity demo repositories
-function generateHighVelocityPRs(owner: string, repo: string) {
-  return [
-    { title: 'perf: optimize AST query cache and reduce memory allocation by 28%' },
-    { title: 'fix: resolve race condition in concurrent batch worker queue' },
-    { title: 'feat: add streaming HTTP/3 response parser for edge gateway' },
-    { title: 'refactor: isolate database connection pooling and add backpressure metrics' },
-    { title: 'fix(security): sanitize markdown URI schemes in comment renderer' },
-    { title: 'feat: support multi-tenant token rotation with zero-downtime grace period' },
-    { title: 'chore: upgrade typescript compiler to v5.8 and strict enum checks' },
-    { title: 'perf(ci): parallelize jest matrix across sharded containers' },
-  ];
-}
-
-function generateHighVelocityIssues(owner: string, repo: string) {
-  return [
-    { title: 'Flaky CI test in web worker integration suite on Node 22' },
-    { title: 'Memory spike observed when processing >10k concurrent SSE streams' },
-    { title: 'Merge conflict resolution drops secondary export in barrel index' },
-    { title: 'Typecheck failure on Windows runner due to path separator normalization' },
-    { title: 'Rate limiter returns HTTP 429 prematurely under burst traffic' },
-  ];
-}
