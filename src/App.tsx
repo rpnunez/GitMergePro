@@ -28,7 +28,20 @@ import { IssuesView } from './components/IssuesView.tsx';
 import { GeminiChatbot } from './components/GeminiChatbot.tsx';
 import { SettingsView } from './components/SettingsView.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
-import { AlertCircle, RefreshCw, Layers } from 'lucide-react';
+
+// Default initial demo repository for unauthenticated / first-time state
+const INITIAL_DEMO_REPO: Repository = {
+  id: 'repo-facebook-react',
+  userId: 'demo',
+  owner: 'facebook',
+  repo: 'react',
+  defaultBranch: 'main',
+  syncIntervalMinutes: 5,
+  lastSyncedAt: new Date().toISOString(),
+  status: 'active',
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+};
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -38,9 +51,9 @@ export default function App() {
   // Tab State
   const [activeTab, setActiveTab] = useState<'prs' | 'pseudo' | 'issues' | 'chat' | 'settings'>('prs');
 
-  // Database Data States
-  const [repositories, setRepositories] = useState<Repository[]>([]);
-  const [activeRepo, setActiveRepo] = useState<Repository | null>(null);
+  // Repositories & Data States
+  const [repositories, setRepositories] = useState<Repository[]>([INITIAL_DEMO_REPO]);
+  const [activeRepo, setActiveRepo] = useState<Repository | null>(INITIAL_DEMO_REPO);
   const [pulls, setPulls] = useState<PullRequest[]>([]);
   const [issues, setIssues] = useState<Issue[]>([]);
   const [pseudoBuilds, setPseudoBuilds] = useState<PseudoBuild[]>([]);
@@ -58,58 +71,92 @@ export default function App() {
 
   // Sync state & Background timer
   const [isSyncing, setIsSyncing] = useState(false);
-  const [lastSyncedTime, setLastSyncedTime] = useState<Date>(new Date());
-  const [secondsUntilNextSync, setSecondsUntilNextSync] = useState(300); // 5 minutes default
+  const [secondsUntilNextSync, setSecondsUntilNextSync] = useState(300);
 
-  // Listen for Firebase Auth
+  // 1. Listen for Firebase Auth state changes
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       setAuthInitialized(true);
     });
     return () => unsubscribe();
   }, []);
 
-  // When user is authenticated or demo mode, load settings & subscribe to repositories
+  // 2. Fetch or initialize data when user changes
   useEffect(() => {
-    const currentUserId = user?.uid || 'demo-user';
+    if (!authInitialized) return;
 
-    // Fetch user settings
-    getUserSettings(currentUserId)
+    if (!user) {
+      // Unauthenticated demo mode: Keep local state only, do NOT attach Firestore listeners
+      setRepositories([INITIAL_DEMO_REPO]);
+      setActiveRepo(INITIAL_DEMO_REPO);
+      // Fetch initial demo PRs via API into local state
+      fetch('/api/sync-github', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ owner: 'facebook', repo: 'react' }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.success && data.pulls) {
+            const mappedPulls = data.pulls.map((p: any) => ({
+              ...p,
+              id: `demo-pr-${p.number}`,
+              userId: 'demo',
+              repoId: INITIAL_DEMO_REPO.id,
+            }));
+            setPulls(mappedPulls);
+            const mappedIssues = (data.issues || []).map((iss: any) => ({
+              ...iss,
+              id: `demo-iss-${iss.number}`,
+              userId: 'demo',
+              repoId: INITIAL_DEMO_REPO.id,
+            }));
+            setIssues(mappedIssues);
+          }
+        })
+        .catch((e) => console.warn('Demo sync notice:', e));
+      return;
+    }
+
+    // Authenticated Mode: Use real user.uid with Firestore
+    const currentUid = user.uid;
+
+    // Load User Settings
+    getUserSettings(currentUid)
       .then((settings) => {
         if (settings) {
           setUserSettings(settings);
           setSecondsUntilNextSync(settings.syncIntervalMinutes * 60);
         } else {
           const defaultSettings: UserSettings = {
-            id: currentUserId,
-            userId: currentUserId,
+            id: currentUid,
+            userId: currentUid,
             syncIntervalMinutes: 5,
             autoRebaseCollisions: true,
             updatedAt: new Date().toISOString(),
           };
-          saveUserSettings(defaultSettings);
+          saveUserSettings(defaultSettings).catch(console.error);
           setUserSettings(defaultSettings);
         }
       })
       .catch((err) => console.warn('Settings load notice:', err));
 
-    // Subscribe to user repositories
-    const unsubRepos = subscribeRepositories(currentUserId, (repos) => {
-      setRepositories(repos);
-      if (repos.length > 0) {
-        // If active repo not set or deleted, select first
+    // Subscribe to Repositories
+    const unsubRepos = subscribeRepositories(currentUid, (loadedRepos) => {
+      if (loadedRepos.length > 0) {
+        setRepositories(loadedRepos);
         setActiveRepo((prev) => {
-          if (!prev || !repos.some((r) => r.id === prev.id)) {
-            return repos[0];
+          if (!prev || !loadedRepos.some((r) => r.id === prev.id)) {
+            return loadedRepos[0];
           }
           return prev;
         });
       } else {
-        // Seed default high-velocity demo repo
-        const defaultRepo: Repository = {
+        // Seed first user repository in Firestore
+        const firstRepo: Repository = {
           id: `repo-react-${Date.now()}`,
-          userId: currentUserId,
+          userId: currentUid,
           owner: 'facebook',
           repo: 'react',
           defaultBranch: 'main',
@@ -119,14 +166,14 @@ export default function App() {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
-        saveRepository(defaultRepo).then(() => {
-          syncRepositoryData(defaultRepo, currentUserId);
+        saveRepository(firstRepo).then(() => {
+          syncRepositoryData(firstRepo, currentUid);
         });
       }
     });
 
-    // Subscribe to chat messages
-    const unsubChat = subscribeChatMessages(currentUserId, (msgs) => {
+    // Subscribe to Chat Messages
+    const unsubChat = subscribeChatMessages(currentUid, (msgs) => {
       setChatMessages(msgs);
     });
 
@@ -134,33 +181,27 @@ export default function App() {
       unsubRepos();
       unsubChat();
     };
-  }, [user]);
+  }, [user, authInitialized]);
 
-  // When active repository changes, subscribe to its PRs, issues, and pseudo builds
+  // 3. When active repository changes in authenticated mode, attach sub-listeners
   useEffect(() => {
-    if (!activeRepo) {
-      setPulls([]);
-      setIssues([]);
-      setPseudoBuilds([]);
-      return;
-    }
+    if (!user || !activeRepo) return;
 
-    const currentUserId = user?.uid || 'demo-user';
+    const currentUid = user.uid;
 
-    const unsubPrs = subscribePullRequests(currentUserId, activeRepo.id, (loadedPrs) => {
+    const unsubPrs = subscribePullRequests(currentUid, activeRepo.id, (loadedPrs) => {
       setPulls(loadedPrs);
-      // Auto-populate pseudo build selection if empty
       if (selectedPrIds.size === 0 && loadedPrs.length > 0) {
         const safeIds = loadedPrs.filter((p) => p.safeToMerge).slice(0, 3).map((p) => p.id);
         setSelectedPrIds(new Set(safeIds));
       }
     });
 
-    const unsubIssues = subscribeIssues(currentUserId, activeRepo.id, (loadedIssues) => {
+    const unsubIssues = subscribeIssues(currentUid, activeRepo.id, (loadedIssues) => {
       setIssues(loadedIssues);
     });
 
-    const unsubBuilds = subscribePseudoBuilds(currentUserId, activeRepo.id, (loadedBuilds) => {
+    const unsubBuilds = subscribePseudoBuilds(currentUid, activeRepo.id, (loadedBuilds) => {
       setPseudoBuilds(loadedBuilds);
     });
 
@@ -169,9 +210,9 @@ export default function App() {
       unsubIssues();
       unsubBuilds();
     };
-  }, [activeRepo, user]);
+  }, [user, activeRepo]);
 
-  // Sync a single repository with GitHub
+  // 4. GitHub Sync Logic
   const syncRepositoryData = useCallback(
     async (repoToSync: Repository, uid: string) => {
       setIsSyncing(true);
@@ -187,46 +228,51 @@ export default function App() {
 
         const data = await response.json();
         if (data.success) {
-          const syncedPrs: PullRequest[] = (data.pulls || []).map((p: any, idx: number) => ({
-            id: `pr-${repoToSync.id}-${p.number}`,
+          const syncedPrs: PullRequest[] = (data.pulls || []).map((p: any) => ({
+            id: `pr-${repoToSync.id}-${p.number}`.replace(/[^a-zA-Z0-9._-]/g, '-'),
             userId: uid,
             repoId: repoToSync.id,
-            number: p.number,
-            title: p.title,
-            author: p.author,
-            authorAvatar: p.authorAvatar,
-            headBranch: p.headBranch,
-            baseBranch: p.baseBranch,
-            status: p.status,
-            ciStatus: p.ciStatus,
-            staticAnalysisStatus: p.staticAnalysisStatus,
-            hasConflicts: p.hasConflicts,
-            conflictedFilesSummary: p.conflictedFilesSummary,
-            safeToMerge: p.safeToMerge,
-            mergeConfidenceScore: p.mergeConfidenceScore,
-            automatedLabelsSummary: p.automatedLabelsSummary,
-            updatedAt: p.updatedAt,
-            createdAt: p.createdAt,
+            number: Number(p.number),
+            title: String(p.title || 'Untitled PR').slice(0, 500),
+            author: String(p.author || 'contributor').slice(0, 120),
+            authorAvatar: String(p.authorAvatar || '').slice(0, 500),
+            headBranch: String(p.headBranch || 'patch').slice(0, 200),
+            baseBranch: String(p.baseBranch || 'main').slice(0, 100),
+            status: String(p.status || 'open').slice(0, 30),
+            ciStatus: p.ciStatus || 'passing',
+            staticAnalysisStatus: p.staticAnalysisStatus || 'clean',
+            hasConflicts: Boolean(p.hasConflicts),
+            conflictedFilesSummary: String(p.conflictedFilesSummary || '').slice(0, 1000),
+            safeToMerge: Boolean(p.safeToMerge),
+            mergeConfidenceScore: Number(p.mergeConfidenceScore || 0),
+            automatedLabelsSummary: String(p.automatedLabelsSummary || '').slice(0, 500),
+            updatedAt: p.updatedAt || new Date().toISOString(),
+            createdAt: p.createdAt || new Date().toISOString(),
           }));
 
           const syncedIssues: Issue[] = (data.issues || []).map((iss: any) => ({
-            id: `iss-${repoToSync.id}-${iss.number}`,
+            id: `iss-${repoToSync.id}-${iss.number}`.replace(/[^a-zA-Z0-9._-]/g, '-'),
             userId: uid,
             repoId: repoToSync.id,
-            number: iss.number,
-            title: iss.title,
-            author: iss.author,
-            state: iss.state,
-            commentsCount: iss.commentsCount,
-            priorityScore: iss.priorityScore,
-            automatedLabelsSummary: iss.automatedLabelsSummary,
-            createdAt: iss.createdAt,
-            updatedAt: iss.updatedAt,
+            number: Number(iss.number),
+            title: String(iss.title || 'Issue').slice(0, 500),
+            author: String(iss.author || 'dev').slice(0, 120),
+            state: iss.state || 'open',
+            commentsCount: Number(iss.commentsCount || 0),
+            priorityScore: Number(iss.priorityScore || 50),
+            automatedLabelsSummary: String(iss.automatedLabelsSummary || '').slice(0, 500),
+            createdAt: iss.createdAt || new Date().toISOString(),
+            updatedAt: iss.updatedAt || new Date().toISOString(),
           }));
 
-          await batchSavePullRequests(uid, repoToSync.id, syncedPrs);
-          await batchSaveIssues(uid, repoToSync.id, syncedIssues);
-          setLastSyncedTime(new Date());
+          // Only save to Firestore if authenticated
+          if (user && uid === user.uid) {
+            await batchSavePullRequests(uid, repoToSync.id, syncedPrs);
+            await batchSaveIssues(uid, repoToSync.id, syncedIssues);
+          } else {
+            setPulls(syncedPrs);
+            setIssues(syncedIssues);
+          }
         }
       } catch (err) {
         console.error('Failed to sync repo:', err);
@@ -234,21 +280,21 @@ export default function App() {
         setIsSyncing(false);
       }
     },
-    []
+    [user]
   );
 
   // Sync on-demand button handler
   const handleSyncCurrent = () => {
     if (!activeRepo) return;
-    const currentUserId = user?.uid || 'demo-user';
-    syncRepositoryData(activeRepo, currentUserId);
+    const currentUid = user?.uid || 'demo';
+    syncRepositoryData(activeRepo, currentUid);
   };
 
   // Sync all repositories button handler
   const handleSyncAll = async () => {
-    const currentUserId = user?.uid || 'demo-user';
+    const currentUid = user?.uid || 'demo';
     for (const r of repositories) {
-      await syncRepositoryData(r, currentUserId);
+      await syncRepositoryData(r, currentUid);
     }
   };
 
@@ -258,9 +304,8 @@ export default function App() {
     const timer = setInterval(() => {
       setSecondsUntilNextSync((prev) => {
         if (prev <= 1) {
-          // Trigger scheduled background sync
           if (activeRepo) {
-            syncRepositoryData(activeRepo, user?.uid || 'demo-user');
+            syncRepositoryData(activeRepo, user?.uid || 'demo');
           }
           return intervalSeconds;
         }
@@ -292,27 +337,40 @@ export default function App() {
 
   // Conflict Rebase Resolution Applier
   const handleApplyResolution = async (prId: string, updatedData: Partial<PullRequest>) => {
-    await updatePullRequest(prId, updatedData);
+    if (user) {
+      await updatePullRequest(prId, updatedData);
+    } else {
+      setPulls((prev) =>
+        prev.map((p) => (p.id === prId ? { ...p, ...updatedData, updatedAt: new Date().toISOString() } : p))
+      );
+    }
     setRebaseModalPr(null);
   };
 
   // Chat Helpers
   const handleSendMessage = async (msg: { role: 'user' | 'assistant'; model: string; content: string }) => {
-    const currentUserId = user?.uid || 'demo-user';
     const newMsg: ChatMessage = {
       id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      userId: currentUserId,
+      userId: user?.uid || 'demo',
       role: msg.role,
       model: msg.model,
       content: msg.content,
       createdAt: new Date().toISOString(),
     };
-    await saveChatMessage(newMsg);
+
+    if (user) {
+      await saveChatMessage(newMsg);
+    } else {
+      setChatMessages((prev) => [...prev, newMsg]);
+    }
   };
 
   const handleClearChatHistory = async () => {
-    const currentUserId = user?.uid || 'demo-user';
-    await clearChatMessages(currentUserId);
+    if (user) {
+      await clearChatMessages(user.uid);
+    } else {
+      setChatMessages([]);
+    }
   };
 
   const handleAskGeminiAboutPr = (pr: PullRequest) => {
@@ -326,10 +384,13 @@ export default function App() {
 
   // Add Repository
   const handleAddRepo = async (newRepoData: { owner: string; repo: string; defaultBranch: string; token?: string }) => {
-    const currentUserId = user?.uid || 'demo-user';
+    const sanitizedOwner = newRepoData.owner.toLowerCase().replace(/[^a-z0-9._-]/g, '-');
+    const sanitizedRepoName = newRepoData.repo.toLowerCase().replace(/[^a-z0-9._-]/g, '-');
+    const repoId = `repo-${sanitizedOwner}-${sanitizedRepoName}-${Date.now()}`;
+
     const newRepo: Repository = {
-      id: `repo-${newRepoData.owner}-${newRepoData.repo}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9_-]/g, '-'),
-      userId: currentUserId,
+      id: repoId,
+      userId: user?.uid || 'demo',
       owner: newRepoData.owner,
       repo: newRepoData.repo,
       defaultBranch: newRepoData.defaultBranch || 'main',
@@ -340,27 +401,42 @@ export default function App() {
       updatedAt: new Date().toISOString(),
     };
 
-    await saveRepository(newRepo);
+    if (user) {
+      await saveRepository(newRepo);
+    } else {
+      setRepositories((prev) => [newRepo, ...prev]);
+    }
+
     setActiveRepo(newRepo);
-    await syncRepositoryData(newRepo, currentUserId);
+    await syncRepositoryData(newRepo, user?.uid || 'demo');
   };
 
   // Remove Repository
   const handleRemoveRepo = async (repoId: string) => {
-    await removeRepository(repoId);
+    if (user) {
+      await removeRepository(repoId);
+    } else {
+      setRepositories((prev) => prev.filter((r) => r.id !== repoId));
+      if (activeRepo?.id === repoId) {
+        setActiveRepo(repositories.find((r) => r.id !== repoId) || null);
+      }
+    }
   };
 
   // Save User Settings
   const handleSaveUserSettings = async (settings: { syncIntervalMinutes: number; autoRebaseCollisions: boolean }) => {
-    const currentUserId = user?.uid || 'demo-user';
+    const currentUid = user?.uid || 'demo';
     const updated: UserSettings = {
-      id: currentUserId,
-      userId: currentUserId,
+      id: currentUid,
+      userId: currentUid,
       syncIntervalMinutes: settings.syncIntervalMinutes,
       autoRebaseCollisions: settings.autoRebaseCollisions,
       updatedAt: new Date().toISOString(),
     };
-    await saveUserSettings(updated);
+
+    if (user) {
+      await saveUserSettings(updated);
+    }
     setUserSettings(updated);
     setSecondsUntilNextSync(settings.syncIntervalMinutes * 60);
   };
@@ -420,9 +496,21 @@ export default function App() {
             selectedPrIds={selectedPrIds}
             onToggleSelectPr={handleToggleSelectPr}
             savedBuilds={pseudoBuilds}
-            onSaveBuild={savePseudoBuild}
-            onDeleteBuild={deletePseudoBuild}
-            userId={user?.uid || 'demo-user'}
+            onSaveBuild={async (b) => {
+              if (user) {
+                await savePseudoBuild(b);
+              } else {
+                setPseudoBuilds((prev) => [b, ...prev]);
+              }
+            }}
+            onDeleteBuild={async (bId) => {
+              if (user) {
+                await deletePseudoBuild(bId);
+              } else {
+                setPseudoBuilds((prev) => prev.filter((b) => b.id !== bId));
+              }
+            }}
+            userId={user?.uid || 'demo'}
           />
         )}
 
@@ -457,7 +545,7 @@ export default function App() {
             onSaveUserSettings={handleSaveUserSettings}
             onSyncAll={handleSyncAll}
             isSyncing={isSyncing}
-            userId={user?.uid || 'demo-user'}
+            userId={user?.uid || 'demo'}
           />
         )}
       </main>

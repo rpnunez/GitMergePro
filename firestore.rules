@@ -9,7 +9,7 @@ service cloud.firestore {
 
     // Hardened Global Helpers
     function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9._-]+$');
     }
 
     function incoming() {
@@ -22,10 +22,6 @@ service cloud.firestore {
 
     function isSignedIn() {
       return request.auth != null;
-    }
-
-    function isOwner(userId) {
-      return isSignedIn() && request.auth.uid == userId;
     }
 
     // Repository Entity Validation
@@ -60,13 +56,13 @@ service cloud.firestore {
              data.createdAt is string && data.createdAt.size() <= 64 &&
              data.updatedAt is string && data.updatedAt.size() <= 64 &&
              (!('author' in data) || (data.author is string && data.author.size() <= 128)) &&
-             (!('authorAvatar' in data) || (data.authorAvatar is string && data.authorAvatar.size() <= 512)) &&
-             (!('headBranch' in data) || (data.headBranch is string && data.headBranch.size() <= 128)) &&
+             (!('authorAvatar' in data) || (data.authorAvatar is string && data.authorAvatar.size() <= 1024)) &&
+             (!('headBranch' in data) || (data.headBranch is string && data.headBranch.size() <= 256)) &&
              (!('baseBranch' in data) || (data.baseBranch is string && data.baseBranch.size() <= 128)) &&
              (!('status' in data) || (data.status is string && data.status.size() <= 32)) &&
-             (!('conflictedFilesSummary' in data) || (data.conflictedFilesSummary is string && data.conflictedFilesSummary.size() <= 1024)) &&
+             (!('conflictedFilesSummary' in data) || (data.conflictedFilesSummary is string && data.conflictedFilesSummary.size() <= 2048)) &&
              (!('mergeConfidenceScore' in data) || data.mergeConfidenceScore is number) &&
-             (!('automatedLabelsSummary' in data) || (data.automatedLabelsSummary is string && data.automatedLabelsSummary.size() <= 512));
+             (!('automatedLabelsSummary' in data) || (data.automatedLabelsSummary is string && data.automatedLabelsSummary.size() <= 1024));
     }
 
     // Issue Entity Validation
@@ -84,7 +80,7 @@ service cloud.firestore {
              (!('author' in data) || (data.author is string && data.author.size() <= 128)) &&
              (!('commentsCount' in data) || data.commentsCount is number) &&
              (!('priorityScore' in data) || data.priorityScore is number) &&
-             (!('automatedLabelsSummary' in data) || (data.automatedLabelsSummary is string && data.automatedLabelsSummary.size() <= 512));
+             (!('automatedLabelsSummary' in data) || (data.automatedLabelsSummary is string && data.automatedLabelsSummary.size() <= 1024));
     }
 
     // PseudoBuild Entity Validation
@@ -131,8 +127,7 @@ service cloud.firestore {
       allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
       allow create: if isSignedIn() && isValidId(repoId) && isValidRepository(incoming());
       allow update: if isSignedIn() && isValidId(repoId) && isValidRepository(incoming()) &&
-                    incoming().userId == existing().userId &&
-                    incoming().diff(existing()).affectedKeys().hasOnly(['owner', 'repo', 'defaultBranch', 'syncIntervalMinutes', 'lastSyncedAt', 'status', 'updatedAt']);
+                    incoming().userId == existing().userId;
       allow delete: if isSignedIn() && isValidId(repoId) && existing().userId == request.auth.uid;
     }
 
@@ -143,8 +138,7 @@ service cloud.firestore {
       allow create: if isSignedIn() && isValidId(prId) && isValidPullRequest(incoming());
       allow update: if isSignedIn() && isValidId(prId) && isValidPullRequest(incoming()) &&
                     incoming().userId == existing().userId &&
-                    incoming().repoId == existing().repoId &&
-                    incoming().diff(existing()).affectedKeys().hasOnly(['title', 'author', 'authorAvatar', 'headBranch', 'baseBranch', 'status', 'ciStatus', 'staticAnalysisStatus', 'hasConflicts', 'conflictedFilesSummary', 'safeToMerge', 'mergeConfidenceScore', 'automatedLabelsSummary', 'updatedAt']);
+                    incoming().repoId == existing().repoId;
       allow delete: if isSignedIn() && isValidId(prId) && existing().userId == request.auth.uid;
     }
 
@@ -155,8 +149,7 @@ service cloud.firestore {
       allow create: if isSignedIn() && isValidId(issueId) && isValidIssue(incoming());
       allow update: if isSignedIn() && isValidId(issueId) && isValidIssue(incoming()) &&
                     incoming().userId == existing().userId &&
-                    incoming().repoId == existing().repoId &&
-                    incoming().diff(existing()).affectedKeys().hasOnly(['title', 'author', 'state', 'commentsCount', 'priorityScore', 'automatedLabelsSummary', 'updatedAt']);
+                    incoming().repoId == existing().repoId;
       allow delete: if isSignedIn() && isValidId(issueId) && existing().userId == request.auth.uid;
     }
 
@@ -184,8 +177,7 @@ service cloud.firestore {
       allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
       allow create: if isSignedIn() && isValidId(userId) && userId == request.auth.uid && isValidUserSettings(incoming());
       allow update: if isSignedIn() && isValidId(userId) && userId == request.auth.uid && isValidUserSettings(incoming()) &&
-                    incoming().userId == existing().userId &&
-                    incoming().diff(existing()).affectedKeys().hasOnly(['syncIntervalMinutes', 'autoRebaseCollisions', 'updatedAt']);
+                    incoming().userId == existing().userId;
       allow delete: if isSignedIn() && isValidId(userId) && userId == request.auth.uid;
     }
   }

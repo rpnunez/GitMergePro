@@ -327,21 +327,21 @@ apiRouter.post('/sync-github', async (req: Request, res: Response) => {
 
       return {
         number: p.number || 100 + idx,
-        title: p.title,
-        author: p.user?.login || p.author || `engineer-${idx + 1}`,
-        authorAvatar: p.user?.avatar_url || `https://api.dicebear.com/7.x/bottts/svg?seed=eng-${idx}`,
-        headBranch: p.head?.ref || `feat/patch-${idx + 1}`,
-        baseBranch: p.base?.ref || 'main',
-        status: p.state || 'open',
+        title: (p.title || 'Untitled PR').slice(0, 500),
+        author: (p.user?.login || p.author || `engineer-${idx + 1}`).slice(0, 120),
+        authorAvatar: (p.user?.avatar_url || `https://api.dicebear.com/7.x/bottts/svg?seed=eng-${idx}`).slice(0, 500),
+        headBranch: (p.head?.ref || `feat/patch-${idx + 1}`).slice(0, 200),
+        baseBranch: (p.base?.ref || 'main').slice(0, 100),
+        status: (p.state || p.status || 'open').slice(0, 30),
         ciStatus,
         staticAnalysisStatus,
-        hasConflicts,
-        conflictedFilesSummary: conflictedFiles.join(', '),
-        safeToMerge,
-        mergeConfidenceScore: safeToMerge ? 96 - (idx * 2) : 35,
-        automatedLabelsSummary: labels.join(', '),
-        updatedAt: new Date(Date.now() - idx * 1800000).toISOString(),
-        createdAt: new Date(Date.now() - (idx + 1) * 86400000).toISOString(),
+        hasConflicts: Boolean(hasConflicts),
+        conflictedFilesSummary: conflictedFiles.join(', ').slice(0, 1000),
+        safeToMerge: Boolean(safeToMerge),
+        mergeConfidenceScore: Number(safeToMerge ? 96 - (idx * 2) : 35),
+        automatedLabelsSummary: labels.join(', ').slice(0, 500),
+        updatedAt: p.updated_at || new Date(Date.now() - idx * 1800000).toISOString(),
+        createdAt: p.created_at || new Date(Date.now() - (idx + 1) * 86400000).toISOString(),
       };
     });
 
@@ -355,14 +355,14 @@ apiRouter.post('/sync-github', async (req: Request, res: Response) => {
 
       return {
         number: iss.number || 400 + idx,
-        title: iss.title,
-        author: iss.user?.login || iss.author || `dev-${idx}`,
-        state: iss.state || 'open',
-        commentsCount: iss.comments || Math.floor(Math.random() * 8),
+        title: (iss.title || 'Issue').slice(0, 500),
+        author: (iss.user?.login || iss.author || `dev-${idx}`).slice(0, 120),
+        state: (iss.state || 'open').slice(0, 30),
+        commentsCount: Number(iss.comments || Math.floor(Math.random() * 8)),
         priorityScore,
-        automatedLabelsSummary: labels.join(', '),
-        createdAt: new Date(Date.now() - (idx + 2) * 86400000).toISOString(),
-        updatedAt: new Date(Date.now() - idx * 3600000).toISOString(),
+        automatedLabelsSummary: labels.join(', ').slice(0, 500),
+        createdAt: iss.created_at || new Date(Date.now() - (idx + 2) * 86400000).toISOString(),
+        updatedAt: iss.updated_at || new Date(Date.now() - idx * 3600000).toISOString(),
       };
     });
 
