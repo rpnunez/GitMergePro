@@ -347,6 +347,42 @@ export default function App() {
     setRebaseModalPr(null);
   };
 
+  // Bulk PR Actions
+  const handleBulkAddLabel = async (prIds: string[], label: string) => {
+    for (const prId of prIds) {
+      const existingPr = pulls.find((p) => p.id === prId);
+      if (!existingPr) continue;
+      const currentLabels = existingPr.automatedLabelsSummary
+        ? existingPr.automatedLabelsSummary.split(',').map((l) => l.trim())
+        : [];
+      if (!currentLabels.includes(label)) {
+        currentLabels.push(label);
+        const updatedLabelsSummary = currentLabels.join(', ');
+        await handleApplyResolution(prId, { automatedLabelsSummary: updatedLabelsSummary });
+      }
+    }
+  };
+
+  const handleBulkClosePrs = async (prIds: string[]) => {
+    for (const prId of prIds) {
+      await handleApplyResolution(prId, { status: 'closed' });
+    }
+    setSelectedPrIds(new Set());
+  };
+
+  const handleBulkRebaseAll = async (prIds: string[]) => {
+    for (const prId of prIds) {
+      await handleApplyResolution(prId, {
+        hasConflicts: false,
+        conflictedFilesSummary: 'Resolved cleanly via bulk 3-way rebase engine',
+        ciStatus: 'passing',
+        staticAnalysisStatus: 'clean',
+        safeToMerge: true,
+        mergeConfidenceScore: 98,
+      });
+    }
+  };
+
   // Chat Helpers
   const handleSendMessage = async (msg: { role: 'user' | 'assistant'; model: string; content: string }) => {
     const newMsg: ChatMessage = {
@@ -485,6 +521,9 @@ export default function App() {
             onOpenRebaseModal={(pr) => setRebaseModalPr(pr)}
             onOpenPseudoModal={() => setActiveTab('pseudo')}
             onAskGeminiAboutPr={handleAskGeminiAboutPr}
+            onBulkAddLabel={handleBulkAddLabel}
+            onBulkClosePrs={handleBulkClosePrs}
+            onBulkRebaseAll={handleBulkRebaseAll}
           />
         )}
 

@@ -18,7 +18,14 @@ import {
   ChevronRight,
   Code2,
   CheckSquare,
-  Square
+  Square,
+  Plus,
+  X,
+  Loader2,
+  Check,
+  BarChart2,
+  BarChart3,
+  SlidersHorizontal
 } from 'lucide-react';
 import { PullRequest, Repository } from '../types/index.ts';
 
@@ -32,6 +39,9 @@ interface PullRequestsViewProps {
   onOpenRebaseModal: (pr: PullRequest) => void;
   onOpenPseudoModal: () => void;
   onAskGeminiAboutPr: (pr: PullRequest) => void;
+  onBulkAddLabel?: (prIds: string[], label: string) => Promise<void>;
+  onBulkClosePrs?: (prIds: string[]) => Promise<void>;
+  onBulkRebaseAll?: (prIds: string[]) => Promise<void>;
 }
 
 export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
@@ -44,10 +54,146 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
   onOpenRebaseModal,
   onOpenPseudoModal,
   onAskGeminiAboutPr,
+  onBulkAddLabel,
+  onBulkClosePrs,
+  onBulkRebaseAll,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'safe' | 'ci_fail' | 'conflicts' | 'static_warn'>('all');
+  const [sortBy, setSortBy] = useState<'recent' | 'conflict_asc' | 'conflict_desc'>('recent');
   const [expandedPrId, setExpandedPrId] = useState<string | null>(null);
+
+  // Bulk Action States
+  const [showLabelPopover, setShowLabelPopover] = useState(false);
+  const [customLabelInput, setCustomLabelInput] = useState('');
+  const [isPerformingBulkAction, setIsPerformingBulkAction] = useState(false);
+  const [bulkActionFeedback, setBulkActionFeedback] = useState<string | null>(null);
+  const [showConfirmClose, setShowConfirmClose] = useState(false);
+
+  // Compute conflict complexity based on number of impacted files
+  const getConflictComplexity = (pr: PullRequest) => {
+    if (!pr.hasConflicts) {
+      return {
+        fileCount: 0,
+        severity: 'none' as const,
+        label: 'Clean',
+        badgeColor: 'border-emerald-500/20 bg-emerald-500/5 text-emerald-400',
+        barColor: 'bg-emerald-400',
+        barsFilled: 0,
+        estimatedTime: 'Ready',
+        description: 'Zero file collisions against target branch',
+      };
+    }
+
+    const files = pr.conflictedFilesSummary
+      ? pr.conflictedFilesSummary.split(',').filter(Boolean).map((s) => s.trim())
+      : ['src/index.ts'];
+    const count = files.length || 1;
+
+    if (count === 1) {
+      return {
+        fileCount: 1,
+        severity: 'low' as const,
+        label: 'Minor',
+        badgeColor: 'border-yellow-500/30 bg-yellow-500/10 text-yellow-300',
+        barColor: 'bg-yellow-400',
+        barsFilled: 1,
+        estimatedTime: '~2m rebase',
+        description: '1 file impacted — quick AST & imports resolution',
+      };
+    } else if (count === 2) {
+      return {
+        fileCount: 2,
+        severity: 'medium' as const,
+        label: 'Moderate',
+        badgeColor: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+        barColor: 'bg-amber-400',
+        barsFilled: 2,
+        estimatedTime: '~5m rebase',
+        description: '2 files impacted — exports or dependencies overlap',
+      };
+    } else if (count === 3) {
+      return {
+        fileCount: 3,
+        severity: 'high' as const,
+        label: 'Substantial',
+        badgeColor: 'border-orange-500/30 bg-orange-500/10 text-orange-300',
+        barColor: 'bg-orange-500',
+        barsFilled: 3,
+        estimatedTime: '~10m rebase',
+        description: '3 files impacted — multi-module overlap',
+      };
+    } else {
+      return {
+        fileCount: count,
+        severity: 'critical' as const,
+        label: 'Complex',
+        badgeColor: 'border-rose-500/30 bg-rose-500/15 text-rose-300',
+        barColor: 'bg-rose-500',
+        barsFilled: 4,
+        estimatedTime: '~15m+ review',
+        description: `${count} files impacted — high complexity structural collision`,
+      };
+    }
+  };
+
+  const selectedCount = selectedPrIds.size;
+  const selectedList = useMemo(() => pulls.filter((p) => selectedPrIds.has(p.id)), [pulls, selectedPrIds]);
+  const conflictedSelectedCount = useMemo(() => selectedList.filter((p) => p.hasConflicts).length, [selectedList]);
+
+  const predefinedLabels = [
+    'safe-to-merge:green',
+    'fast-track',
+    'approved-for-train',
+    'blocked:needs-qa',
+    'p0-critical',
+    'needs-docs',
+  ];
+
+  const handleApplyBulkLabel = async (label: string) => {
+    if (!label.trim() || !onBulkAddLabel) return;
+    setIsPerformingBulkAction(true);
+    try {
+      await onBulkAddLabel(Array.from(selectedPrIds), label.trim());
+      setBulkActionFeedback(`Added label "${label}" to ${selectedCount} PRs`);
+      setShowLabelPopover(false);
+      setCustomLabelInput('');
+      setTimeout(() => setBulkActionFeedback(null), 3000);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsPerformingBulkAction(false);
+    }
+  };
+
+  const handleApplyBulkRebase = async () => {
+    if (!onBulkRebaseAll) return;
+    setIsPerformingBulkAction(true);
+    try {
+      await onBulkRebaseAll(Array.from(selectedPrIds));
+      setBulkActionFeedback(`Rebased and resolved collisions for ${selectedCount} PRs`);
+      setTimeout(() => setBulkActionFeedback(null), 3000);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsPerformingBulkAction(false);
+    }
+  };
+
+  const handleApplyBulkClose = async () => {
+    if (!onBulkClosePrs) return;
+    setIsPerformingBulkAction(true);
+    try {
+      await onBulkClosePrs(Array.from(selectedPrIds));
+      setBulkActionFeedback(`Closed ${selectedCount} PRs`);
+      setShowConfirmClose(false);
+      setTimeout(() => setBulkActionFeedback(null), 3000);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsPerformingBulkAction(false);
+    }
+  };
 
   // Statistics
   const safePulls = useMemo(() => pulls.filter((p) => p.safeToMerge), [pulls]);
@@ -60,7 +206,7 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
 
   // Filtered list
   const filteredPulls = useMemo(() => {
-    return pulls.filter((p) => {
+    const list = pulls.filter((p) => {
       // Type filter
       if (filterType === 'safe' && !p.safeToMerge) return false;
       if (filterType === 'ci_fail' && p.ciStatus !== 'failing') return false;
@@ -78,7 +224,28 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
       }
       return true;
     });
-  }, [pulls, filterType, searchQuery]);
+
+    // Sort by selected criteria
+    if (sortBy === 'conflict_asc') {
+      list.sort((a, b) => {
+        const countA = getConflictComplexity(a).fileCount;
+        const countB = getConflictComplexity(b).fileCount;
+        if (countA === 0 && countB > 0) return 1;
+        if (countB === 0 && countA > 0) return -1;
+        return countA - countB;
+      });
+    } else if (sortBy === 'conflict_desc') {
+      list.sort((a, b) => {
+        const countA = getConflictComplexity(a).fileCount;
+        const countB = getConflictComplexity(b).fileCount;
+        return countB - countA;
+      });
+    } else {
+      list.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    }
+
+    return list;
+  }, [pulls, filterType, searchQuery, sortBy]);
 
   return (
     <div className="space-y-6">
@@ -204,8 +371,24 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
           </div>
         </div>
 
-        {/* Pseudo Build Trigger */}
+        {/* Sort and Pseudo Build Trigger */}
         <div className="flex items-center gap-3">
+          {/* Conflict Complexity Sort Selector */}
+          <div className="flex items-center gap-1.5 rounded-xl border border-slate-800 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-300">
+            <BarChart2 className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+            <span className="text-slate-500 text-[11px] hidden md:inline">Sort:</span>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as any)}
+              className="bg-transparent text-xs text-slate-200 focus:outline-none cursor-pointer"
+              title="Sort PRs to prioritize conflict resolution"
+            >
+              <option value="recent" className="bg-slate-900 text-white">Most Recent</option>
+              <option value="conflict_asc" className="bg-slate-900 text-white">Complexity: Lowest First (Quick Wins)</option>
+              <option value="conflict_desc" className="bg-slate-900 text-white">Complexity: Highest First (Blockers)</option>
+            </select>
+          </div>
+
           <button
             onClick={onOpenPseudoModal}
             disabled={selectedPrIds.size === 0}
@@ -238,6 +421,7 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
             const labels = pr.automatedLabelsSummary
               ? pr.automatedLabelsSummary.split(',').map((l) => l.trim())
               : [];
+            const complexity = getConflictComplexity(pr);
 
             return (
               <div
@@ -350,20 +534,69 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
                       <span className="capitalize">{pr.staticAnalysisStatus}</span>
                     </div>
 
-                    {/* Conflict Status & Fix Conflict Button */}
+                    {/* Conflict Complexity Severity Indicator & Rebase CTA */}
                     {pr.hasConflicts ? (
-                      <button
-                        onClick={() => onOpenRebaseModal(pr)}
-                        className="flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1 text-xs font-bold text-amber-300 hover:bg-amber-500/25 transition-all shadow-sm"
-                        title="Rebase onto main branch and auto-resolve collisions"
-                      >
-                        <GitMerge className="h-3.5 w-3.5" />
-                        <span>Fix Merge Conflicts</span>
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {/* Mini-Bar Chart Stepped Visual Indicator */}
+                        <div
+                          className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold ${complexity.badgeColor}`}
+                          title={`${complexity.fileCount} file(s) collided. Severity: ${complexity.label} (${complexity.description})`}
+                        >
+                          {/* 4-Level Stepped Mini-Bar Chart */}
+                          <div className="flex items-end gap-0.5 h-3.5" title={`Conflict Severity Level: ${complexity.barsFilled}/4`}>
+                            <div
+                              className={`w-1 rounded-xs transition-all ${
+                                complexity.barsFilled >= 1 ? `h-2 ${complexity.barColor}` : 'h-1.5 bg-slate-800'
+                              }`}
+                            />
+                            <div
+                              className={`w-1 rounded-xs transition-all ${
+                                complexity.barsFilled >= 2 ? `h-2.5 ${complexity.barColor}` : 'h-1.5 bg-slate-800'
+                              }`}
+                            />
+                            <div
+                              className={`w-1 rounded-xs transition-all ${
+                                complexity.barsFilled >= 3 ? `h-3 ${complexity.barColor}` : 'h-1.5 bg-slate-800'
+                              }`}
+                            />
+                            <div
+                              className={`w-1 rounded-xs transition-all ${
+                                complexity.barsFilled >= 4 ? `h-3.5 ${complexity.barColor}` : 'h-1.5 bg-slate-800'
+                              }`}
+                            />
+                          </div>
+
+                          <div className="flex items-center gap-1">
+                            <span>{complexity.fileCount} {complexity.fileCount === 1 ? 'file' : 'files'}</span>
+                            <span className="text-[10px] uppercase font-bold tracking-wider px-1 py-0.2 rounded bg-black/40">
+                              {complexity.severity}
+                            </span>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => onOpenRebaseModal(pr)}
+                          className="flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1 text-xs font-bold text-amber-300 hover:bg-amber-500/25 transition-all shadow-sm"
+                          title="Rebase onto main branch and auto-resolve collisions"
+                        >
+                          <GitMerge className="h-3.5 w-3.5" />
+                          <span>Fix Merge Conflicts</span>
+                        </button>
+                      </div>
                     ) : (
-                      <div className="flex items-center gap-1 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1 text-xs font-medium text-emerald-400">
+                      <div
+                        className="flex items-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1 text-xs font-medium text-emerald-400"
+                        title="Zero merge conflicts against target branch"
+                      >
+                        {/* 4-Level Stepped Mini-Bar Chart (Zero Filled) */}
+                        <div className="flex items-end gap-0.5 h-3.5 opacity-40">
+                          <div className="w-1 h-1.5 rounded-xs bg-emerald-500/40" />
+                          <div className="w-1 h-2 rounded-xs bg-emerald-500/40" />
+                          <div className="w-1 h-2.5 rounded-xs bg-emerald-500/40" />
+                          <div className="w-1 h-3 rounded-xs bg-emerald-500/40" />
+                        </div>
                         <CheckCircle2 className="h-3.5 w-3.5" />
-                        <span>Clean</span>
+                        <span>Clean (0 files)</span>
                       </div>
                     )}
 
@@ -415,15 +648,59 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Conflicted Files Notice if present */}
-                    {pr.hasConflicts && pr.conflictedFilesSummary && (
-                      <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
-                        <div className="text-xs font-semibold text-amber-400">
-                          Conflicted Files against target: {pr.conflictedFilesSummary}
+                    {/* Conflicted Files & Complexity Breakdown */}
+                    {pr.hasConflicts && (
+                      <div className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-4 space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-amber-500/10 pb-2.5">
+                          <div className="flex items-center gap-2">
+                            <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
+                            <span className="text-xs font-bold text-amber-300">
+                              Conflict Complexity Analysis: {complexity.label} ({complexity.fileCount} {complexity.fileCount === 1 ? 'file' : 'files'} collided)
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {/* Stepped Mini-Bar Chart (Enlarged in Drawer) */}
+                            <div className="flex items-end gap-1 h-4 bg-slate-900/90 px-2 py-0.5 rounded-md border border-slate-800" title={`Severity: ${complexity.barsFilled}/4`}>
+                              <div className={`w-1.5 rounded-xs ${complexity.barsFilled >= 1 ? `h-2.5 ${complexity.barColor}` : 'h-1.5 bg-slate-800'}`} />
+                              <div className={`w-1.5 rounded-xs ${complexity.barsFilled >= 2 ? `h-3.5 ${complexity.barColor}` : 'h-1.5 bg-slate-800'}`} />
+                              <div className={`w-1.5 rounded-xs ${complexity.barsFilled >= 3 ? `h-4.5 ${complexity.barColor}` : 'h-1.5 bg-slate-800'}`} />
+                              <div className={`w-1.5 rounded-xs ${complexity.barsFilled >= 4 ? `h-5 ${complexity.barColor}` : 'h-1.5 bg-slate-800'}`} />
+                            </div>
+                            <span className="text-[11px] font-semibold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                              {complexity.estimatedTime}
+                            </span>
+                          </div>
                         </div>
-                        <p className="mt-1 text-[11px] text-slate-400">
-                          Use the "Fix Merge Conflicts" tool above to auto-rebase and resolve imports / dependencies without git command line friction.
-                        </p>
+
+                        {/* Impacted Files Pills */}
+                        <div>
+                          <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 block mb-1.5">
+                            Impacted Files ({complexity.fileCount}):
+                          </span>
+                          <div className="flex flex-wrap gap-1.5">
+                            {(pr.conflictedFilesSummary ? pr.conflictedFilesSummary.split(',').filter(Boolean) : ['src/index.ts']).map((file, i) => (
+                              <span key={i} className="flex items-center gap-1 font-mono text-[11px] bg-slate-900 border border-slate-800 px-2 py-0.5 rounded text-amber-300">
+                                <Code2 className="h-3 w-3 text-amber-400" />
+                                {file.trim()}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Prioritization Recommendation */}
+                        <div className="rounded-lg bg-slate-900/80 p-2.5 border border-slate-800 text-[11px] text-slate-300 flex items-start gap-2">
+                          <BarChart3 className="h-3.5 w-3.5 text-amber-400 shrink-0 mt-0.5" />
+                          <div>
+                            <span className="font-semibold text-white">Triage Priority: </span>
+                            {complexity.fileCount === 1 ? (
+                              <span className="text-emerald-300">Low complexity quick win. Prioritize resolving this PR early to unblock downstream dependent branches.</span>
+                            ) : complexity.fileCount === 2 ? (
+                              <span className="text-amber-300">Moderate complexity. Resolvable quickly with automated 3-way semantic rebase.</span>
+                            ) : (
+                              <span className="text-rose-300">Substantial collision across multiple architectural modules. Prioritize coordination with branch author.</span>
+                            )}
+                          </div>
+                        </div>
                       </div>
                     )}
 
@@ -455,6 +732,207 @@ export const PullRequestsView: React.FC<PullRequestsViewProps> = ({
           })
         )}
       </div>
+
+      {/* Sticky Floating Action Menu for Multiple Selected PRs */}
+      {selectedCount >= 2 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-5 fade-in duration-200">
+          <div className="relative flex items-center gap-2 rounded-2xl border border-slate-700/80 bg-slate-900/95 p-2 shadow-2xl backdrop-blur-xl ring-1 ring-white/10">
+            {/* Selection Counter */}
+            <div className="flex items-center gap-1.5 rounded-xl bg-cyan-500/15 px-3 py-2 text-xs font-bold text-cyan-300 border border-cyan-500/25">
+              <CheckSquare className="h-4 w-4" />
+              <span>{selectedCount} PRs</span>
+            </div>
+
+            {/* Bulk Action: Add Label */}
+            <div className="relative">
+              <button
+                onClick={() => setShowLabelPopover(!showLabelPopover)}
+                disabled={isPerformingBulkAction}
+                className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-all ${
+                  showLabelPopover
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'bg-slate-800 text-slate-200 hover:bg-slate-700 hover:text-white'
+                }`}
+                title="Add a label to all selected PRs"
+              >
+                <Tag className="h-3.5 w-3.5 text-indigo-400" />
+                <span>Add Label</span>
+              </button>
+
+              {/* Add Label Popover */}
+              {showLabelPopover && (
+                <div className="absolute bottom-full left-0 mb-3 w-72 rounded-2xl border border-slate-800 bg-slate-950 p-4 shadow-2xl animate-in zoom-in-95 duration-150">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-3">
+                    <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <Tag className="h-3.5 w-3.5 text-indigo-400" />
+                      Apply Label ({selectedCount} PRs)
+                    </span>
+                    <button
+                      onClick={() => setShowLabelPopover(false)}
+                      className="text-slate-500 hover:text-white p-0.5 rounded"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  {/* Predefined Chips */}
+                  <div className="flex flex-wrap gap-1.5 mb-3">
+                    {predefinedLabels.map((lbl) => (
+                      <button
+                        key={lbl}
+                        onClick={() => handleApplyBulkLabel(lbl)}
+                        disabled={isPerformingBulkAction}
+                        className="rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 text-[11px] font-medium text-slate-300 hover:border-indigo-500/40 hover:bg-indigo-500/10 hover:text-indigo-300 transition-colors"
+                      >
+                        +{lbl}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Custom Label Input */}
+                  <div className="flex items-center gap-1.5 pt-2 border-t border-slate-800/80">
+                    <input
+                      type="text"
+                      value={customLabelInput}
+                      onChange={(e) => setCustomLabelInput(e.target.value)}
+                      placeholder="Custom label..."
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleApplyBulkLabel(customLabelInput);
+                        }
+                      }}
+                      className="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-1 text-xs text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => handleApplyBulkLabel(customLabelInput)}
+                      disabled={!customLabelInput.trim() || isPerformingBulkAction}
+                      className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Bulk Action: Rebase All */}
+            <button
+              onClick={handleApplyBulkRebase}
+              disabled={isPerformingBulkAction}
+              className="flex items-center gap-1.5 rounded-xl bg-amber-500/15 border border-amber-500/30 px-3 py-2 text-xs font-semibold text-amber-300 hover:bg-amber-500/25 transition-all shadow-sm disabled:opacity-50"
+              title={
+                conflictedSelectedCount > 0
+                  ? `Rebase all and auto-resolve ${conflictedSelectedCount} conflicted PRs`
+                  : 'Rebase all selected PRs onto target branch'
+              }
+            >
+              <GitMerge className="h-3.5 w-3.5 text-amber-400" />
+              <span>Rebase All</span>
+              {conflictedSelectedCount > 0 && (
+                <span className="rounded-full bg-amber-500/30 px-1.5 py-0.2 text-[10px] font-bold text-amber-200">
+                  {conflictedSelectedCount}
+                </span>
+              )}
+            </button>
+
+            {/* Bulk Action: Close PRs */}
+            <button
+              onClick={() => setShowConfirmClose(true)}
+              disabled={isPerformingBulkAction}
+              className="flex items-center gap-1.5 rounded-xl bg-rose-500/15 border border-rose-500/30 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-500/25 transition-all shadow-sm disabled:opacity-50"
+              title="Close all selected pull requests"
+            >
+              <XCircle className="h-3.5 w-3.5 text-rose-400" />
+              <span>Close PRs</span>
+            </button>
+
+            {/* Launch Pseudo Build */}
+            <button
+              onClick={onOpenPseudoModal}
+              disabled={isPerformingBulkAction}
+              className="flex items-center gap-1.5 rounded-xl bg-cyan-500 px-3 py-2 text-xs font-bold text-slate-950 hover:bg-cyan-400 transition-all shadow-md shadow-cyan-500/20 disabled:opacity-50"
+              title="Launch composite pseudo build merge simulation"
+            >
+              <Layers className="h-3.5 w-3.5" />
+              <span>Pseudo Build</span>
+            </button>
+
+            {/* Deselect All */}
+            <button
+              onClick={onClearSelection}
+              disabled={isPerformingBulkAction}
+              className="rounded-xl p-2 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+              title="Deselect all PRs"
+            >
+              <X className="h-4 w-4" />
+            </button>
+
+            {/* Loading Indicator */}
+            {isPerformingBulkAction && (
+              <div className="absolute inset-0 flex items-center justify-center rounded-2xl bg-slate-950/80 backdrop-blur-sm z-10">
+                <div className="flex items-center gap-2 text-xs font-semibold text-cyan-400">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Processing bulk action...</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Feedback Toast */}
+          {bulkActionFeedback && (
+            <div className="mt-2 text-center animate-in fade-in slide-in-from-bottom-2 duration-150">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-950/90 px-3.5 py-1 text-xs font-medium text-emerald-300 shadow-lg backdrop-blur-md">
+                <Check className="h-3.5 w-3.5" />
+                {bulkActionFeedback}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Confirmation Dialog for Bulk Close */}
+      {showConfirmClose && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl text-slate-100">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-rose-500/20 text-rose-400">
+                <XCircle className="h-6 w-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Close {selectedCount} Pull Requests?</h3>
+                <p className="text-xs text-slate-400">This will mark all {selectedCount} selected PRs as closed.</p>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 max-h-36 overflow-y-auto space-y-1 mb-5">
+              {selectedList.map((pr) => (
+                <div key={pr.id} className="text-xs text-slate-300 flex items-center gap-2 truncate">
+                  <span className="font-mono text-slate-500">#{pr.number}</span>
+                  <span className="truncate">{pr.title}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowConfirmClose(false)}
+                className="rounded-xl border border-slate-800 px-4 py-2 text-xs font-semibold text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleApplyBulkClose}
+                disabled={isPerformingBulkAction}
+                className="flex items-center gap-1.5 rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-500 transition-colors shadow-lg shadow-rose-600/20 disabled:opacity-50"
+              >
+                {isPerformingBulkAction ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <XCircle className="h-3.5 w-3.5" />}
+                <span>Confirm &amp; Close PRs</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
