@@ -1,0 +1,372 @@
+{
+  "entities": {
+    "Repository": {
+      "title": "Repository",
+      "description": "Connected GitHub repository tracking settings and sync status",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the repository record",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the repository owner",
+          "maxLength": 128
+        },
+        "owner": {
+          "type": "string",
+          "description": "GitHub organization or user account name",
+          "maxLength": 128
+        },
+        "repo": {
+          "type": "string",
+          "description": "GitHub repository name",
+          "maxLength": 128
+        },
+        "defaultBranch": {
+          "type": "string",
+          "description": "Default target branch e.g. main or master",
+          "maxLength": 64
+        },
+        "syncIntervalMinutes": {
+          "type": "number",
+          "description": "Sync frequency in minutes"
+        },
+        "lastSyncedAt": {
+          "type": "string",
+          "description": "ISO timestamp of the last sync run",
+          "maxLength": 64
+        },
+        "status": {
+          "type": "string",
+          "description": "Connection status e.g. active or error",
+          "maxLength": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of creation",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "userId", "owner", "repo", "defaultBranch", "createdAt", "updatedAt"]
+    },
+    "PullRequest": {
+      "title": "PullRequest",
+      "description": "Pull request with CI status, static analysis results, conflict checks, and triage labels",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the PR record",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user tracking this PR",
+          "maxLength": 128
+        },
+        "repoId": {
+          "type": "string",
+          "description": "ID of the parent repository",
+          "maxLength": 128
+        },
+        "number": {
+          "type": "number",
+          "description": "Pull request number in GitHub"
+        },
+        "title": {
+          "type": "string",
+          "description": "PR title",
+          "maxLength": 512
+        },
+        "author": {
+          "type": "string",
+          "description": "GitHub username of the PR author",
+          "maxLength": 128
+        },
+        "authorAvatar": {
+          "type": "string",
+          "description": "Avatar URL of author",
+          "maxLength": 512
+        },
+        "headBranch": {
+          "type": "string",
+          "description": "Source branch name",
+          "maxLength": 128
+        },
+        "baseBranch": {
+          "type": "string",
+          "description": "Target branch name",
+          "maxLength": 128
+        },
+        "status": {
+          "type": "string",
+          "description": "PR state (open, closed, merged)",
+          "maxLength": 32
+        },
+        "ciStatus": {
+          "type": "string",
+          "description": "CI and GitHub Actions status (passing, failing, pending)",
+          "maxLength": 32
+        },
+        "staticAnalysisStatus": {
+          "type": "string",
+          "description": "Static analysis check (clean, warnings, errors)",
+          "maxLength": 32
+        },
+        "hasConflicts": {
+          "type": "boolean",
+          "description": "Whether merge conflicts exist against target branch"
+        },
+        "conflictedFilesSummary": {
+          "type": "string",
+          "description": "Comma separated or formatted summary of conflicted files",
+          "maxLength": 1024
+        },
+        "safeToMerge": {
+          "type": "boolean",
+          "description": "Safe to merge flag computed from CI, static analysis, and conflict check"
+        },
+        "mergeConfidenceScore": {
+          "type": "number",
+          "description": "Confidence score from 0 to 100"
+        },
+        "automatedLabelsSummary": {
+          "type": "string",
+          "description": "Automated triage labels stringified",
+          "maxLength": 512
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of creation",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "userId", "repoId", "number", "title", "ciStatus", "staticAnalysisStatus", "hasConflicts", "safeToMerge", "createdAt", "updatedAt"]
+    },
+    "Issue": {
+      "title": "Issue",
+      "description": "Tracked GitHub repository issue with automated triage score",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the issue record",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user tracking this issue",
+          "maxLength": 128
+        },
+        "repoId": {
+          "type": "string",
+          "description": "ID of parent repository",
+          "maxLength": 128
+        },
+        "number": {
+          "type": "number",
+          "description": "Issue number in GitHub"
+        },
+        "title": {
+          "type": "string",
+          "description": "Issue title",
+          "maxLength": 512
+        },
+        "author": {
+          "type": "string",
+          "description": "Author username",
+          "maxLength": 128
+        },
+        "state": {
+          "type": "string",
+          "description": "Issue state open or closed",
+          "maxLength": 32
+        },
+        "commentsCount": {
+          "type": "number",
+          "description": "Number of comments"
+        },
+        "priorityScore": {
+          "type": "number",
+          "description": "Automated priority score"
+        },
+        "automatedLabelsSummary": {
+          "type": "string",
+          "description": "Prioritization labels summary",
+          "maxLength": 512
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of creation",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of update",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "userId", "repoId", "number", "title", "state", "createdAt", "updatedAt"]
+    },
+    "PseudoBuild": {
+      "title": "PseudoBuild",
+      "description": "Simulated multi-PR merge train and collision check result",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the pseudo build",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "maxLength": 128
+        },
+        "repoId": {
+          "type": "string",
+          "description": "Parent repository ID",
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "description": "Name or title for the pseudo build batch",
+          "maxLength": 256
+        },
+        "selectedPrNumbers": {
+          "type": "string",
+          "description": "Comma separated list of PR numbers",
+          "maxLength": 512
+        },
+        "canMergeAll": {
+          "type": "boolean",
+          "description": "Whether all PRs can be merged sequentially without conflicts"
+        },
+        "riskLevel": {
+          "type": "string",
+          "description": "Risk level low, medium, high, or blocking",
+          "maxLength": 32
+        },
+        "summary": {
+          "type": "string",
+          "description": "Summary report of mergability and collision analysis",
+          "maxLength": 2048
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of creation",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "userId", "repoId", "title", "selectedPrNumbers", "canMergeAll", "riskLevel", "summary", "createdAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Persisted AI triage consultation message",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique message ID",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "maxLength": 128
+        },
+        "role": {
+          "type": "string",
+          "description": "Message sender role (user or assistant)",
+          "maxLength": 32
+        },
+        "model": {
+          "type": "string",
+          "description": "Gemini model used for response",
+          "maxLength": 64
+        },
+        "content": {
+          "type": "string",
+          "description": "Message body text",
+          "maxLength": 8192
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of message",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "userId", "role", "model", "content", "createdAt"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "User preferences for sync interval and GitHub automation",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "User ID matching request.auth.uid",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "maxLength": 128
+        },
+        "syncIntervalMinutes": {
+          "type": "number",
+          "description": "Scheduled background sync cadence in minutes"
+        },
+        "autoRebaseCollisions": {
+          "type": "boolean",
+          "description": "Whether to auto-resolve simple collisions on rebase"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "userId", "syncIntervalMinutes", "autoRebaseCollisions", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/repositories/{repoId}": {
+      "schema": { "$ref": "#/entities/Repository" },
+      "description": "Collection of connected GitHub repositories per user"
+    },
+    "/pull_requests/{prId}": {
+      "schema": { "$ref": "#/entities/PullRequest" },
+      "description": "Collection of pull requests tracked across connected repositories"
+    },
+    "/issues/{issueId}": {
+      "schema": { "$ref": "#/entities/Issue" },
+      "description": "Collection of tracked GitHub issues with prioritization score"
+    },
+    "/pseudo_builds/{buildId}": {
+      "schema": { "$ref": "#/entities/PseudoBuild" },
+      "description": "Collection of pseudo build merge simulations and conflict checks"
+    },
+    "/chat_messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Collection of Gemini multi-turn triage chat messages"
+    },
+    "/settings/{userId}": {
+      "schema": { "$ref": "#/entities/UserSettings" },
+      "description": "User-specific configuration for background sync interval and preferences"
+    }
+  }
+}

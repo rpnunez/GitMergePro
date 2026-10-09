@@ -1,0 +1,192 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net Default-Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Repository Entity Validation
+    function isValidRepository(data) {
+      return data.keys().hasAll(['id', 'userId', 'owner', 'repo', 'defaultBranch', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'owner', 'repo', 'defaultBranch', 'syncIntervalMinutes', 'lastSyncedAt', 'status', 'createdAt', 'updatedAt']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.owner is string && data.owner.size() <= 128 &&
+             data.repo is string && data.repo.size() <= 128 &&
+             data.defaultBranch is string && data.defaultBranch.size() <= 64 &&
+             data.createdAt is string && data.createdAt.size() <= 64 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64 &&
+             (!('syncIntervalMinutes' in data) || data.syncIntervalMinutes is number) &&
+             (!('lastSyncedAt' in data) || (data.lastSyncedAt is string && data.lastSyncedAt.size() <= 64)) &&
+             (!('status' in data) || (data.status is string && data.status.size() <= 32));
+    }
+
+    // PullRequest Entity Validation
+    function isValidPullRequest(data) {
+      return data.keys().hasAll(['id', 'userId', 'repoId', 'number', 'title', 'ciStatus', 'staticAnalysisStatus', 'hasConflicts', 'safeToMerge', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'repoId', 'number', 'title', 'author', 'authorAvatar', 'headBranch', 'baseBranch', 'status', 'ciStatus', 'staticAnalysisStatus', 'hasConflicts', 'conflictedFilesSummary', 'safeToMerge', 'mergeConfidenceScore', 'automatedLabelsSummary', 'updatedAt', 'createdAt']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.repoId is string && data.repoId.size() <= 128 &&
+             data.number is number &&
+             data.title is string && data.title.size() <= 512 &&
+             data.ciStatus is string && data.ciStatus.size() <= 32 &&
+             data.staticAnalysisStatus is string && data.staticAnalysisStatus.size() <= 32 &&
+             data.hasConflicts is bool &&
+             data.safeToMerge is bool &&
+             data.createdAt is string && data.createdAt.size() <= 64 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64 &&
+             (!('author' in data) || (data.author is string && data.author.size() <= 128)) &&
+             (!('authorAvatar' in data) || (data.authorAvatar is string && data.authorAvatar.size() <= 512)) &&
+             (!('headBranch' in data) || (data.headBranch is string && data.headBranch.size() <= 128)) &&
+             (!('baseBranch' in data) || (data.baseBranch is string && data.baseBranch.size() <= 128)) &&
+             (!('status' in data) || (data.status is string && data.status.size() <= 32)) &&
+             (!('conflictedFilesSummary' in data) || (data.conflictedFilesSummary is string && data.conflictedFilesSummary.size() <= 1024)) &&
+             (!('mergeConfidenceScore' in data) || data.mergeConfidenceScore is number) &&
+             (!('automatedLabelsSummary' in data) || (data.automatedLabelsSummary is string && data.automatedLabelsSummary.size() <= 512));
+    }
+
+    // Issue Entity Validation
+    function isValidIssue(data) {
+      return data.keys().hasAll(['id', 'userId', 'repoId', 'number', 'title', 'state', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'repoId', 'number', 'title', 'author', 'state', 'commentsCount', 'priorityScore', 'automatedLabelsSummary', 'createdAt', 'updatedAt']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.repoId is string && data.repoId.size() <= 128 &&
+             data.number is number &&
+             data.title is string && data.title.size() <= 512 &&
+             data.state is string && data.state.size() <= 32 &&
+             data.createdAt is string && data.createdAt.size() <= 64 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64 &&
+             (!('author' in data) || (data.author is string && data.author.size() <= 128)) &&
+             (!('commentsCount' in data) || data.commentsCount is number) &&
+             (!('priorityScore' in data) || data.priorityScore is number) &&
+             (!('automatedLabelsSummary' in data) || (data.automatedLabelsSummary is string && data.automatedLabelsSummary.size() <= 512));
+    }
+
+    // PseudoBuild Entity Validation
+    function isValidPseudoBuild(data) {
+      return data.keys().hasAll(['id', 'userId', 'repoId', 'title', 'selectedPrNumbers', 'canMergeAll', 'riskLevel', 'summary', 'createdAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'repoId', 'title', 'selectedPrNumbers', 'canMergeAll', 'riskLevel', 'summary', 'createdAt']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.repoId is string && data.repoId.size() <= 128 &&
+             data.title is string && data.title.size() <= 256 &&
+             data.selectedPrNumbers is string && data.selectedPrNumbers.size() <= 512 &&
+             data.canMergeAll is bool &&
+             data.riskLevel is string && data.riskLevel.size() <= 32 &&
+             data.summary is string && data.summary.size() <= 2048 &&
+             data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
+    // ChatMessage Entity Validation
+    function isValidChatMessage(data) {
+      return data.keys().hasAll(['id', 'userId', 'role', 'model', 'content', 'createdAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'role', 'model', 'content', 'createdAt']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.role is string && data.role.size() <= 32 &&
+             data.model is string && data.model.size() <= 64 &&
+             data.content is string && data.content.size() <= 8192 &&
+             data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
+    // UserSettings Entity Validation
+    function isValidUserSettings(data) {
+      return data.keys().hasAll(['id', 'userId', 'syncIntervalMinutes', 'autoRebaseCollisions', 'updatedAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'syncIntervalMinutes', 'autoRebaseCollisions', 'updatedAt']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.syncIntervalMinutes is number &&
+             data.autoRebaseCollisions is bool &&
+             data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    // 1. Repositories Collection
+    match /repositories/{repoId} {
+      allow get: if isSignedIn() && isValidId(repoId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(repoId) && isValidRepository(incoming());
+      allow update: if isSignedIn() && isValidId(repoId) && isValidRepository(incoming()) &&
+                    incoming().userId == existing().userId &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['owner', 'repo', 'defaultBranch', 'syncIntervalMinutes', 'lastSyncedAt', 'status', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(repoId) && existing().userId == request.auth.uid;
+    }
+
+    // 2. Pull Requests Collection
+    match /pull_requests/{prId} {
+      allow get: if isSignedIn() && isValidId(prId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(prId) && isValidPullRequest(incoming());
+      allow update: if isSignedIn() && isValidId(prId) && isValidPullRequest(incoming()) &&
+                    incoming().userId == existing().userId &&
+                    incoming().repoId == existing().repoId &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['title', 'author', 'authorAvatar', 'headBranch', 'baseBranch', 'status', 'ciStatus', 'staticAnalysisStatus', 'hasConflicts', 'conflictedFilesSummary', 'safeToMerge', 'mergeConfidenceScore', 'automatedLabelsSummary', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(prId) && existing().userId == request.auth.uid;
+    }
+
+    // 3. Issues Collection
+    match /issues/{issueId} {
+      allow get: if isSignedIn() && isValidId(issueId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(issueId) && isValidIssue(incoming());
+      allow update: if isSignedIn() && isValidId(issueId) && isValidIssue(incoming()) &&
+                    incoming().userId == existing().userId &&
+                    incoming().repoId == existing().repoId &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['title', 'author', 'state', 'commentsCount', 'priorityScore', 'automatedLabelsSummary', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(issueId) && existing().userId == request.auth.uid;
+    }
+
+    // 4. Pseudo Builds Collection
+    match /pseudo_builds/{buildId} {
+      allow get: if isSignedIn() && isValidId(buildId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(buildId) && isValidPseudoBuild(incoming());
+      allow update: if false; // Pseudo builds are immutable historical runs
+      allow delete: if isSignedIn() && isValidId(buildId) && existing().userId == request.auth.uid;
+    }
+
+    // 5. Chat Messages Collection
+    match /chat_messages/{messageId} {
+      allow get: if isSignedIn() && isValidId(messageId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(messageId) && isValidChatMessage(incoming());
+      allow update: if false; // Chat messages are append-only
+      allow delete: if isSignedIn() && isValidId(messageId) && existing().userId == request.auth.uid;
+    }
+
+    // 6. User Settings Collection
+    match /settings/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(userId) && userId == request.auth.uid && isValidUserSettings(incoming());
+      allow update: if isSignedIn() && isValidId(userId) && userId == request.auth.uid && isValidUserSettings(incoming()) &&
+                    incoming().userId == existing().userId &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['syncIntervalMinutes', 'autoRebaseCollisions', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(userId) && userId == request.auth.uid;
+    }
+  }
+}

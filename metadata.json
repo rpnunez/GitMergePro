@@ -1,0 +1,6 @@
+{
+  "name": "GitMerge Pro - Real-Time High-Velocity GitHub PR & CI Merger",
+  "description": "Real-time GitHub PR and issue tracker with static analysis triage, CI status gates, automated prioritization labels, pseudo build simulations, and automated conflict rebase resolver.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
