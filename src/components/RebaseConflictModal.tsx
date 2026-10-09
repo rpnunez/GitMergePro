@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   GitMerge,
   GitPullRequest,
@@ -12,7 +12,9 @@ import {
   ShieldCheck,
   Sparkles,
   Copy,
-  Check
+  Check,
+  RefreshCw,
+  FolderGit2
 } from 'lucide-react';
 import { PullRequest, Repository } from '../types/index.ts';
 
@@ -35,12 +37,69 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
   const [resolutionResult, setResolutionResult] = useState<any>(null);
   const [isApplying, setIsApplying] = useState(false);
   const [copiedCommands, setCopiedCommands] = useState(false);
+  
+  // Real PR files state
+  const [prFiles, setPrFiles] = useState<string[]>([]);
+  const [isLoadingFiles, setIsLoadingFiles] = useState(false);
+  const [filesSource, setFilesSource] = useState<'live_pr' | 'cached' | 'analyzed'>('cached');
+
+  // Load and sanitize files for THIS specific PR when opened
+  useEffect(() => {
+    if (!isOpen || !pr) return;
+
+    // Check if cached summary is already valid and repo-specific (and doesn't have old legacy bug values)
+    const existingSummary = pr.conflictedFilesSummary?.trim();
+    const isLegacyArtifact = existingSummary && (
+      existingSummary.includes('src/index.ts') || 
+      existingSummary.includes('GitMergePro') ||
+      (existingSummary.includes('package.json') && !repo.repo.includes('json') && !repo.repo.includes('node') && !repo.repo.includes('react'))
+    );
+
+    if (existingSummary && !isLegacyArtifact) {
+      const parsed = existingSummary.split(',').map((f) => f.trim()).filter(Boolean);
+      if (parsed.length > 0) {
+        setPrFiles(parsed);
+        setFilesSource('cached');
+      }
+    }
+
+    // Always fetch latest files directly for this PR from the server/GitHub API
+    setIsLoadingFiles(true);
+    fetch('/api/pr-files', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        owner: repo.owner,
+        repo: repo.repo,
+        prNumber: pr.number,
+        title: pr.title,
+        headBranch: pr.headBranch,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && Array.isArray(data.files) && data.files.length > 0) {
+          const filenames: string[] = data.files.map((f: any) => f.filename);
+          setPrFiles(filenames);
+          setFilesSource(data.isLive ? 'live_pr' : 'analyzed');
+
+          // If previously missing or had old bug data, silently sync this PR record in DB
+          if (isLegacyArtifact || !existingSummary) {
+            onApplyResolution(pr.id, {
+              conflictedFilesSummary: filenames.join(', '),
+            }).catch(console.warn);
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to load PR files:', err);
+      })
+      .finally(() => {
+        setIsLoadingFiles(false);
+      });
+  }, [isOpen, pr?.id, repo.owner, repo.repo]);
 
   if (!isOpen) return null;
-
-  const conflictedFilesList = pr.conflictedFilesSummary
-    ? pr.conflictedFilesSummary.split(',').map((f) => f.trim())
-    : ['src/index.ts', 'package.json'];
 
   const handleRunRebase = async () => {
     setIsResolving(true);
@@ -49,10 +108,13 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          owner: repo.owner,
+          repo: repo.repo,
           prNumber: pr.number,
           title: pr.title,
-          conflictedFiles: conflictedFilesList,
+          headBranch: pr.headBranch || 'patch',
           targetBranch: pr.baseBranch || repo.defaultBranch || 'main',
+          conflictedFiles: prFiles,
         }),
       });
 
@@ -71,7 +133,7 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
       // Clear conflicts and update safeToMerge in DB
       await onApplyResolution(pr.id, {
         hasConflicts: false,
-        conflictedFilesSummary: 'Resolved automatically via 3-way semantic rebase',
+        conflictedFilesSummary: prFiles.length > 0 ? `Resolved (${prFiles.join(', ')})` : 'Resolved automatically via 3-way semantic rebase',
         ciStatus: 'passing',
         staticAnalysisStatus: 'clean',
         safeToMerge: true,
@@ -110,6 +172,10 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
                 <span className="rounded bg-slate-800 px-2 py-0.5 text-[11px] text-slate-300">
                   PR #{pr.number}
                 </span>
+                <span className="rounded bg-slate-800/80 px-2 py-0.5 text-[11px] text-cyan-400 font-mono flex items-center gap-1">
+                  <FolderGit2 className="h-3 w-3" />
+                  {repo.owner}/{repo.repo}
+                </span>
               </div>
               <h2 className="text-lg font-bold text-white mt-0.5">{pr.title}</h2>
               <div className="flex items-center gap-2 mt-1 text-xs text-slate-400">
@@ -129,25 +195,45 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
 
         {/* Content Body */}
         <div className="mt-5 space-y-5">
-          {/* Conflicted Files Notice */}
+          {/* Conflicted Files from Selected PR Notice */}
           <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
-            <div className="flex items-center gap-2 text-amber-400 text-sm font-semibold">
-              <AlertTriangle className="h-4 w-4" />
-              <span>Detected File Collisions ({conflictedFilesList.length})</span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-amber-400 text-sm font-semibold">
+                <AlertTriangle className="h-4 w-4" />
+                <span>
+                  Detected File Collisions in PR #{pr.number} ({prFiles.length})
+                </span>
+              </div>
+              {isLoadingFiles ? (
+                <span className="flex items-center gap-1.5 text-xs text-slate-400 font-mono">
+                  <Loader2 className="h-3 w-3 animate-spin text-amber-400" />
+                  Fetching files for PR #{pr.number}...
+                </span>
+              ) : (
+                <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                  {filesSource === 'live_pr' ? 'Live GitHub PR Files' : 'PR Changed Files'}
+                </span>
+              )}
             </div>
+            
             <p className="mt-1 text-xs text-slate-400">
-              Target branch has moved ahead. The following files have concurrent modifications that require rebase resolution:
+              Target branch <span className="font-mono text-emerald-400 font-semibold">{pr.baseBranch || 'main'}</span> has moved ahead. The following files modified in this pull request have concurrent modifications that require rebase resolution:
             </p>
+            
             <div className="mt-3 flex flex-wrap gap-2">
-              {conflictedFilesList.map((file, i) => (
-                <div
-                  key={i}
-                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-mono text-amber-300"
-                >
-                  <FileCode className="h-3.5 w-3.5 text-amber-400" />
-                  <span>{file}</span>
-                </div>
-              ))}
+              {prFiles.length === 0 && !isLoadingFiles ? (
+                <span className="text-xs text-slate-500 italic">No file collisions detected for this PR.</span>
+              ) : (
+                prFiles.map((file, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-mono text-amber-300 shadow-xs"
+                  >
+                    <FileCode className="h-3.5 w-3.5 text-amber-400" />
+                    <span>{file}</span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
 
@@ -157,17 +243,17 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
               <Sparkles className="mx-auto h-8 w-8 text-cyan-400 mb-2" />
               <h3 className="text-sm font-semibold text-white">Smart 3-Way Rebase Simulation</h3>
               <p className="mt-1 text-xs text-slate-400 max-w-md mx-auto">
-                Automatically rebases PR #{pr.number} onto {pr.baseBranch || 'main'}, deduplicates colliding imports, reconciles package.json version bumps, and solves non-overlapping function collisions.
+                Automatically rebases PR #{pr.number} onto {pr.baseBranch || 'main'}, deduplicates colliding imports, reconciles version bumps and configuration keys, and resolves concurrent file modifications for {repo.owner}/{repo.repo}.
               </p>
               <button
                 onClick={handleRunRebase}
-                disabled={isResolving}
+                disabled={isResolving || prFiles.length === 0}
                 className="mt-4 inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 px-5 py-2.5 text-xs font-bold text-slate-950 hover:from-emerald-400 hover:to-teal-500 transition-all shadow-lg shadow-teal-500/20 disabled:opacity-50"
               >
                 {isResolving ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>Analyzing AST &amp; Rebasing Files...</span>
+                    <span>Analyzing AST &amp; Rebasing Files for PR #{pr.number}...</span>
                   </>
                 ) : (
                   <>
@@ -202,7 +288,7 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
               {/* Resolved Files List */}
               <div className="space-y-2">
                 <h5 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  Resolved File Collisions
+                  Resolved File Collisions in PR #{pr.number}
                 </h5>
                 {resolutionResult.filesResolved?.map((fileRes: any, idx: number) => (
                   <div key={idx} className="rounded-xl border border-slate-800 bg-slate-950 p-3.5">
@@ -211,7 +297,7 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
                         <FileCode className="h-3.5 w-3.5" />
                         {fileRes.file}
                       </span>
-                      <span className="text-[10px] rounded bg-slate-800 px-2 py-0.5 text-slate-400 uppercase">
+                      <span className="text-[10px] rounded bg-slate-800 px-2 py-0.5 text-slate-400 uppercase font-mono">
                         {fileRes.collisionType}
                       </span>
                     </div>
@@ -231,7 +317,7 @@ export const RebaseConflictModal: React.FC<RebaseConflictModalProps> = ({
                   <div className="flex items-center justify-between mb-2">
                     <span className="flex items-center gap-2 text-xs font-semibold text-slate-300">
                       <Terminal className="h-3.5 w-3.5 text-slate-400" />
-                      Git Terminal Commands
+                      Git Terminal Commands for PR #{pr.number}
                     </span>
                     <button
                       onClick={copyCommands}

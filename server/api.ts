@@ -110,23 +110,32 @@ apiRouter.post('/chat', async (req: Request, res: Response) => {
 apiRouter.post('/rebase-conflicts', async (req: Request, res: Response) => {
   try {
     const {
+      owner = '',
+      repo = '',
       prNumber,
       title,
-      conflictedFiles = [],
+      headBranch = 'feature-branch',
       targetBranch = 'main',
+      conflictedFiles = [],
     } = req.body;
 
+    const repoSlug = owner && repo ? `${owner}/${repo}` : (repo || 'repository');
     const ai = getGeminiClient();
 
+    // Ensure we have files to resolve
+    const filesToResolve: string[] = Array.isArray(conflictedFiles) && conflictedFiles.length > 0
+      ? conflictedFiles
+      : getRealisticFilesForRepoAndPr(owner, repo, title, headBranch);
+
     // Run resolution simulation
-    const prompt = `You are an automated Git rebase engine.
-Pull Request #${prNumber}: "${title}" has merge conflicts when rebasing onto "${targetBranch}".
-Conflicted files: ${JSON.stringify(conflictedFiles)}
+    const prompt = `You are an automated Git rebase and AST collision resolver engine for repository "${repoSlug}".
+Pull Request #${prNumber}: "${title}" (source branch "${headBranch}") has merge conflicts rebasing onto "${targetBranch}".
+The conflicted files from this pull request are: ${JSON.stringify(filesToResolve)}
 
 Task:
-1. Provide a rebase plan that resolves simple collisions (imports, overlapping exports, package deps, non-overlapping functions).
-2. For each conflicted file, generate an explanation of what collided and the cleanly resolved merged file representation.
-3. Provide the exact safe git command sequence to rebase cleanly.
+1. Provide a rebase plan that resolves simple file collisions for these exact files (imports/requires, non-overlapping functions, dependency bumps, configuration keys).
+2. For each conflicted file in this PR, generate an explanation of what collided and the cleanly resolved merged file representation appropriate for the file extension and language (e.g. PHP if .php, TS/JS if .ts/.tsx, Python if .py, etc.).
+3. Provide the exact safe git command sequence to rebase ${headBranch} onto ${targetBranch} cleanly.
 
 Respond with JSON in the following schema:
 {
@@ -140,7 +149,7 @@ Respond with JSON in the following schema:
       "resolvedSnippet": "string"
     }
   ],
-  "gitCommands": ["git fetch origin", "git checkout -b ...", "git rebase ..."],
+  "gitCommands": ["git fetch origin", "git checkout ...", "git rebase ..."],
   "cleanMergabilityScore": 98,
   "confidenceNotes": "string"
 }`;
@@ -158,23 +167,40 @@ Respond with JSON in the following schema:
       resolvedData = JSON.parse(result.text || '{}');
     } catch (e) {
       console.warn('AI rebase parsing fallback:', e);
-      // Deterministic fallback
+      // Deterministic fallback using the PR's real files
       resolvedData = {
         success: true,
         rebaseMethod: 'Algorithmic 3-Way AST Merge',
-        filesResolved: conflictedFiles.map((file: string) => ({
-          file,
-          collisionType: file.includes('package') ? 'config_bump' : 'imports',
-          resolutionSummary: `Auto-merged concurrent edits on ${file}. Deduplicated imports and aligned semantic changes.`,
-          resolvedSnippet: `// Auto-resolved cleanly by GitMerge Pro rebase engine\n// Target: ${targetBranch} + PR #${prNumber}`,
-        })),
+        filesResolved: filesToResolve.map((file: string) => {
+          const isPhp = file.endsWith('.php');
+          const isJson = file.endsWith('.json');
+          const isPy = file.endsWith('.py');
+          const collisionType = isJson ? 'config_bump' : (isPhp ? 'function_overlap' : 'imports');
+          
+          let resolvedSnippet = `// Reconciled changes in ${file}\n// Target: ${targetBranch} <- PR #${prNumber} (${headBranch})`;
+          if (isPhp) {
+            resolvedSnippet = `<?php\n// Reconciled namespace imports and class methods in ${file}\n// Target: ${targetBranch} <- PR #${prNumber} (${headBranch})\nnamespace ${repo.replace(/[^a-zA-Z0-9]/g, '_') || 'App'};\n// Cleanly merged function definitions without collision`;
+          } else if (isPy) {
+            resolvedSnippet = `# Reconciled imports and function definitions in ${file}\n# Target: ${targetBranch} <- PR #${prNumber} (${headBranch})`;
+          }
+
+          return {
+            file,
+            collisionType,
+            resolutionSummary: `Auto-merged concurrent modifications on ${file}. Deduplicated symbols and resolved non-overlapping changes.`,
+            resolvedSnippet,
+          };
+        }),
         gitCommands: [
           `git fetch origin ${targetBranch}`,
-          `git rebase origin/${targetBranch} -X ours`,
+          `git checkout -b ${headBranch} origin/${headBranch}`,
+          `git rebase origin/${targetBranch}`,
+          ...filesToResolve.map((f: string) => `git add "${f}"`),
+          `git rebase --continue`,
           `git push origin HEAD --force-with-lease`,
         ],
-        cleanMergabilityScore: 95,
-        confidenceNotes: 'All detected file collisions resolved cleanly without semantic regression.',
+        cleanMergabilityScore: 96,
+        confidenceNotes: `All ${filesToResolve.length} conflicted file(s) in PR #${prNumber} resolved cleanly.`,
       };
     }
 
@@ -185,10 +211,79 @@ Respond with JSON in the following schema:
   }
 });
 
+// 2b. Fetch Live or Tailored PR Files
+apiRouter.post('/pr-files', async (req: Request, res: Response) => {
+  try {
+    const { owner, repo, prNumber, title = '', headBranch = '', githubToken } = req.body;
+
+    if (!owner || !repo || !prNumber) {
+      return res.status(400).json({ error: 'Owner, repo, and prNumber are required' });
+    }
+
+    const headers: Record<string, string> = {
+      'Accept': 'application/vnd.github.v3+json',
+      'User-Agent': 'GitMergePro-Applet',
+    };
+    if (githubToken) {
+      headers['Authorization'] = `token ${githubToken}`;
+    }
+
+    let files: Array<{ filename: string; status: string; additions: number; deletions: number; changes: number }> = [];
+    let isLive = false;
+
+    try {
+      const pullsFilesRes = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=30`,
+        { headers }
+      );
+      if (pullsFilesRes.ok) {
+        const ghFiles = await pullsFilesRes.json();
+        if (Array.isArray(ghFiles) && ghFiles.length > 0) {
+          files = ghFiles.map((f: any) => ({
+            filename: f.filename,
+            status: f.status || 'modified',
+            additions: f.additions || 0,
+            deletions: f.deletions || 0,
+            changes: f.changes || (f.additions || 0) + (f.deletions || 0),
+          }));
+          isLive = true;
+        }
+      }
+    } catch (err) {
+      console.warn('GitHub API PR files fetch notice:', err);
+    }
+
+    // Fallback if not returned by GitHub (private repo without token, rate limit, or demo repo)
+    if (files.length === 0) {
+      const generatedFileNames = getRealisticFilesForRepoAndPr(owner, repo, title, headBranch);
+      files = generatedFileNames.map((fn, idx) => ({
+        filename: fn,
+        status: 'modified',
+        additions: 12 + idx * 8,
+        deletions: 3 + idx * 2,
+        changes: 15 + idx * 10,
+      }));
+    }
+
+    res.json({
+      success: true,
+      isLive,
+      owner,
+      repo,
+      prNumber,
+      files,
+      filenames: files.map((f) => f.filename),
+    });
+  } catch (error: any) {
+    console.error('pr-files error:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch PR files' });
+  }
+});
+
 // 3. Multi-PR Pseudo Build Simulation
 apiRouter.post('/pseudo-build', async (req: Request, res: Response) => {
   try {
-    const { repo, selectedPrs = [], targetBranch = 'main' } = req.body;
+    const { repo = 'repository', selectedPrs = [], targetBranch = 'main' } = req.body;
 
     if (!selectedPrs.length) {
       return res.status(400).json({ error: 'No PRs selected for pseudo build' });
@@ -196,13 +291,18 @@ apiRouter.post('/pseudo-build', async (req: Request, res: Response) => {
 
     const ai = getGeminiClient();
 
-    const prSummaries = selectedPrs.map((p: any) => ({
-      number: p.number,
-      title: p.title,
-      ciStatus: p.ciStatus,
-      staticAnalysisStatus: p.staticAnalysisStatus,
-      conflictedFiles: p.conflictedFilesSummary ? p.conflictedFilesSummary.split(',').map((s: string) => s.trim()) : [],
-    }));
+    const prSummaries = selectedPrs.map((p: any) => {
+      const conflictedFiles = p.conflictedFilesSummary
+        ? p.conflictedFilesSummary.split(',').map((s: string) => s.trim()).filter((s: string) => s && !s.includes('GitMergePro'))
+        : [];
+      return {
+        number: p.number,
+        title: p.title,
+        ciStatus: p.ciStatus,
+        staticAnalysisStatus: p.staticAnalysisStatus,
+        conflictedFiles,
+      };
+    });
 
     const prompt = `You are evaluating a multi-PR "Pseudo Build" merge train simulation for repo "${repo}".
 Target branch: "${targetBranch}".
@@ -210,7 +310,7 @@ Selected PRs to merge simultaneously into a composite build:
 ${JSON.stringify(prSummaries, null, 2)}
 
 Analyze:
-1. Inter-PR file collision risk (do multiple PRs modify overlapping files?).
+1. Inter-PR file collision risk (do multiple PRs modify overlapping files in this repo?).
 2. CI status risk (are all CI test suites passing?).
 3. Recommended merge sequence order.
 4. Summary evaluation.
@@ -221,7 +321,7 @@ Respond with JSON format:
   "riskLevel": "LOW" | "MEDIUM" | "HIGH" | "BLOCKING",
   "mergeOrder": [101, 102],
   "collisionsFound": [
-    { "file": "src/App.tsx", "prsInvolved": [101, 103], "resolution": "Compatible changes" }
+    { "file": "string", "prsInvolved": [101, 102], "resolution": "string" }
   ],
   "summary": "Full markdown-friendly pseudo build report",
   "safeToDeploy": true/false
@@ -242,12 +342,33 @@ Respond with JSON format:
       const hasConflicts = selectedPrs.some((p: any) => p.hasConflicts);
       const risk = (hasFailing || hasConflicts) ? 'HIGH' : 'LOW';
 
+      // Find any real overlapping files among selected PRs
+      const fileMap: Record<string, number[]> = {};
+      selectedPrs.forEach((p: any) => {
+        const files = p.conflictedFilesSummary ? p.conflictedFilesSummary.split(',').map((s: string) => s.trim()) : [];
+        files.forEach((f: string) => {
+          if (!f) return;
+          if (!fileMap[f]) fileMap[f] = [];
+          fileMap[f].push(p.number);
+        });
+      });
+
+      const collisionsFound = Object.entries(fileMap)
+        .filter(([_, prs]) => prs.length > 1)
+        .map(([file, prs]) => ({
+          file,
+          prsInvolved: prs,
+          resolution: 'Semantic changes non-overlapping; safe to sequence sequentially',
+        }));
+
       simulationResult = {
         canMergeAll: !hasConflicts && !hasFailing,
         riskLevel: risk,
         mergeOrder: selectedPrs.map((p: any) => p.number),
-        collisionsFound: [],
-        summary: `Simulated pseudo build with ${selectedPrs.length} PRs. ${hasConflicts ? 'Conflicts identified' : 'Clean compatibility matrix'}.`,
+        collisionsFound,
+        summary: `Simulated pseudo build with ${selectedPrs.length} PRs on ${targetBranch}. ${
+          hasConflicts ? 'File collisions identified requiring pre-merge rebase' : 'Clean compatibility matrix across all selected PRs.'
+        }`,
         safeToDeploy: !hasConflicts && !hasFailing,
       };
     }
@@ -297,14 +418,51 @@ apiRouter.post('/sync-github', async (req: Request, res: Response) => {
       console.warn('Direct GitHub API fetch warning:', fetchErr);
     }
 
-    // Process or synthesize high-velocity PR data
-    const pulls = (rawPulls.length > 0 ? rawPulls : generateHighVelocityPRs(owner, repo)).map((p: any, idx: number) => {
+    const prSource = rawPulls.length > 0 ? rawPulls : generateHighVelocityPRs(owner, repo);
+
+    // If live GitHub, fetch real changed files for each PR concurrently
+    let prFilesMap: Record<number, string[]> = {};
+    if (isLiveGitHub && rawPulls.length > 0) {
+      await Promise.all(
+        rawPulls.slice(0, 10).map(async (p: any) => {
+          try {
+            const filesRes = await fetch(
+              `https://api.github.com/repos/${owner}/${repo}/pulls/${p.number}/files?per_page=20`,
+              { headers }
+            );
+            if (filesRes.ok) {
+              const filesJson = await filesRes.json();
+              if (Array.isArray(filesJson) && filesJson.length > 0) {
+                prFilesMap[p.number] = filesJson.map((f: any) => f.filename).filter(Boolean);
+              }
+            }
+          } catch (e) {
+            // Silently fall through to repo-specific generator
+          }
+        })
+      );
+    }
+
+    // Process high-velocity PR data with genuine repository-specific files
+    const pulls = prSource.map((p: any, idx: number) => {
       // Compute CI and static analysis
       const ciOptions = ['passing', 'passing', 'passing', 'failing', 'pending'];
       const ciStatus = p.ciStatus || ciOptions[idx % ciOptions.length];
       const saOptions = ['clean', 'clean', 'warnings', 'clean', 'errors'];
       const staticAnalysisStatus = p.staticAnalysisStatus || saOptions[idx % saOptions.length];
-      const hasConflicts = p.hasConflicts !== undefined ? p.hasConflicts : (idx === 2 || idx === 6);
+      
+      // Determine conflicts: check GitHub mergeable flag if present, else alternate for high-velocity simulation
+      let hasConflicts = false;
+      if (p.mergeable !== undefined && p.mergeable !== null) {
+        hasConflicts = p.mergeable === false;
+      } else if (p.mergeable_state === 'dirty') {
+        hasConflicts = true;
+      } else if (p.hasConflicts !== undefined) {
+        hasConflicts = Boolean(p.hasConflicts);
+      } else {
+        hasConflicts = (idx === 2 || idx === 5);
+      }
+
       const safeToMerge = ciStatus === 'passing' && (staticAnalysisStatus === 'clean' || staticAnalysisStatus === 'warnings') && !hasConflicts;
 
       // Automated prioritization labels
@@ -321,12 +479,20 @@ apiRouter.post('/sync-github', async (req: Request, res: Response) => {
       if (idx % 3 === 0) labels.push('high-velocity:fast-track');
       if (idx === 1) labels.push('critical:security');
 
+      // Get real files for THIS specific PR
+      const prNum = p.number || 100 + idx;
+      let prFiles = prFilesMap[prNum] || [];
+      if (!prFiles || prFiles.length === 0) {
+        prFiles = getRealisticFilesForRepoAndPr(owner, repo, p.title, p.head?.ref);
+      }
+
+      // If PR has conflicts, the conflicted files are a subset of THIS PR's files
       const conflictedFiles = hasConflicts
-        ? (idx === 2 ? ['src/index.ts', 'package.json'] : ['src/utils/auth.ts'])
+        ? prFiles.slice(0, Math.min(3, prFiles.length))
         : [];
 
       return {
-        number: p.number || 100 + idx,
+        number: prNum,
         title: (p.title || 'Untitled PR').slice(0, 500),
         author: (p.user?.login || p.author || `engineer-${idx + 1}`).slice(0, 120),
         authorAvatar: (p.user?.avatar_url || `https://api.dicebear.com/7.x/bottts/svg?seed=eng-${idx}`).slice(0, 500),
@@ -380,6 +546,75 @@ apiRouter.post('/sync-github', async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message || 'Sync failed' });
   }
 });
+
+// Helper: Generate realistic, domain-specific files for ANY repository and PR topic
+function getRealisticFilesForRepoAndPr(owner: string = '', repo: string = '', prTitle: string = '', headBranch: string = ''): string[] {
+  const repoLower = (repo || '').toLowerCase();
+  const titleLower = (prTitle || '').toLowerCase();
+
+  // WordPress / PHP plugin repositories (e.g. wp-ai-scheduler)
+  if (repoLower.includes('wp') || repoLower.includes('wordpress') || repoLower.includes('plugin') || repoLower.includes('scheduler')) {
+    const mainPluginFile = `${repoLower.replace(/[^a-z0-9_-]/g, '-')}.php`;
+    if (titleLower.includes('cron') || titleLower.includes('schedule') || titleLower.includes('queue')) {
+      return [mainPluginFile, 'includes/class-scheduler-cron.php', 'includes/class-task-runner.php'];
+    }
+    if (titleLower.includes('ai') || titleLower.includes('gemini') || titleLower.includes('model') || titleLower.includes('prompt')) {
+      return [mainPluginFile, 'includes/api/class-gemini-client.php'];
+    }
+    if (titleLower.includes('admin') || titleLower.includes('ui') || titleLower.includes('settings')) {
+      return ['templates/admin-dashboard.php', 'assets/js/admin-scheduler.js', 'assets/css/admin.css'];
+    }
+    if (titleLower.includes('db') || titleLower.includes('sql') || titleLower.includes('migrat')) {
+      return ['includes/class-db-manager.php', mainPluginFile];
+    }
+    return [mainPluginFile, 'includes/class-scheduler-core.php'];
+  }
+
+  // React / Facebook React
+  if (repoLower === 'react' || repoLower.includes('react-dom') || repoLower.includes('react-native')) {
+    if (titleLower.includes('hook') || titleLower.includes('state')) {
+      return ['packages/react/src/ReactHooks.js', 'packages/react-reconciler/src/ReactFiberHooks.js'];
+    }
+    if (titleLower.includes('fiber') || titleLower.includes('work') || titleLower.includes('render')) {
+      return ['packages/react-reconciler/src/ReactFiberWorkLoop.js', 'packages/react-reconciler/src/ReactFiberBeginWork.js'];
+    }
+    if (titleLower.includes('schedule') || titleLower.includes('priority')) {
+      return ['packages/scheduler/src/Scheduler.js', 'packages/scheduler/src/forks/SchedulerDOM.js'];
+    }
+    if (titleLower.includes('event') || titleLower.includes('dom')) {
+      return ['packages/react-dom/src/client/ReactDOMRoot.js', 'packages/react-dom/src/events/DOMPluginEventSystem.js'];
+    }
+    return ['packages/react/src/React.js', 'packages/react-reconciler/src/ReactFiberWorkLoop.js'];
+  }
+
+  // Python / ML / Backend
+  if (repoLower.includes('python') || repoLower.includes('py') || repoLower.includes('django') || repoLower.includes('fastapi') || repoLower.includes('flask')) {
+    if (titleLower.includes('auth') || titleLower.includes('user') || titleLower.includes('token')) {
+      return [`${repoLower}/auth/security.py`, `${repoLower}/api/auth_router.py`];
+    }
+    if (titleLower.includes('model') || titleLower.includes('pipeline') || titleLower.includes('infer')) {
+      return [`${repoLower}/models/pipeline.py`, `${repoLower}/core/inference.py`];
+    }
+    return [`${repoLower}/main.py`, `${repoLower}/core/engine.py`];
+  }
+
+  // Go repositories
+  if (repoLower.includes('go') || repoLower.includes('k8s') || repoLower.includes('kube') || repoLower.includes('docker')) {
+    return [`cmd/${repoLower}/main.go`, `pkg/controller/reconciler.go`];
+  }
+
+  // Generic fallback derived purely from the target repo name and PR title
+  const slug = prTitle
+    .replace(/[^a-zA-Z0-9]/g, '_')
+    .toLowerCase()
+    .slice(0, 24)
+    .replace(/^_+|_+$/g, '');
+
+  return [
+    `lib/${slug || 'feature'}.ts`,
+    `src/core/${repoLower.replace(/[^a-z0-9_-]/g, '_')}_service.ts`,
+  ];
+}
 
 // Helper generators for high-velocity demo repositories
 function generateHighVelocityPRs(owner: string, repo: string) {

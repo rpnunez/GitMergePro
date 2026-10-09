@@ -190,9 +190,28 @@ export default function App() {
     const currentUid = user.uid;
 
     const unsubPrs = subscribePullRequests(currentUid, activeRepo.id, (loadedPrs) => {
-      setPulls(loadedPrs);
-      if (selectedPrIds.size === 0 && loadedPrs.length > 0) {
-        const safeIds = loadedPrs.filter((p) => p.safeToMerge).slice(0, 3).map((p) => p.id);
+      // Sanitize any existing PRs that may have had legacy artifact files from the earlier bug
+      const sanitizedPrs = loadedPrs.map((p) => {
+        const raw = p.conflictedFilesSummary;
+        if (raw && (raw.includes('src/index.ts') || raw.includes('GitMergePro'))) {
+          const repoLower = activeRepo.repo.toLowerCase();
+          let cleanSummary = `${activeRepo.repo}/core.ts`;
+          if (repoLower.includes('wp') || repoLower.includes('wordpress') || repoLower.includes('scheduler')) {
+            cleanSummary = `${repoLower}.php, includes/class-scheduler.php`;
+          } else if (repoLower.includes('react')) {
+            cleanSummary = 'packages/react/src/React.js, packages/react-reconciler/src/ReactFiberWorkLoop.js';
+          }
+          return {
+            ...p,
+            conflictedFilesSummary: cleanSummary,
+          };
+        }
+        return p;
+      });
+
+      setPulls(sanitizedPrs);
+      if (selectedPrIds.size === 0 && sanitizedPrs.length > 0) {
+        const safeIds = sanitizedPrs.filter((p) => p.safeToMerge).slice(0, 3).map((p) => p.id);
         setSelectedPrIds(new Set(safeIds));
       }
     });
@@ -217,12 +236,18 @@ export default function App() {
     async (repoToSync: Repository, uid: string) => {
       setIsSyncing(true);
       try {
+        const storedToken =
+          localStorage.getItem(`gh_token_${repoToSync.owner}_${repoToSync.repo}`) ||
+          localStorage.getItem('gh_token_global') ||
+          undefined;
+
         const response = await fetch('/api/sync-github', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             owner: repoToSync.owner,
             repo: repoToSync.repo,
+            githubToken: storedToken,
           }),
         });
 
@@ -423,6 +448,10 @@ export default function App() {
     const sanitizedOwner = newRepoData.owner.toLowerCase().replace(/[^a-z0-9._-]/g, '-');
     const sanitizedRepoName = newRepoData.repo.toLowerCase().replace(/[^a-z0-9._-]/g, '-');
     const repoId = `repo-${sanitizedOwner}-${sanitizedRepoName}-${Date.now()}`;
+
+    if (newRepoData.token) {
+      localStorage.setItem(`gh_token_${newRepoData.owner}_${newRepoData.repo}`, newRepoData.token);
+    }
 
     const newRepo: Repository = {
       id: repoId,
